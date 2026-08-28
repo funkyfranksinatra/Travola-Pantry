@@ -1,0 +1,1072 @@
+// ═══════════════════════════════════════════════════════════════════
+// MesaOS — schema.prisma
+// PostgreSQL · Prisma ORM
+//
+// One lifecycle, one table: a Reservation is never moved between
+// "future/current/past" tables — its `status` enum and timestamp trio
+// (targetTime → seatedTime → finishedTime) ARE the lifecycle. The AI
+// predictor reads the Shift rollups (and raw Reservations) using the
+// denormalized time-series keys: serviceDate (@db.Date) + dayOfWeek.
+// "Give me the last 12 Fridays of dinner service" is a single
+// index-backed query: WHERE dayOfWeek = 5 AND period = DINNER
+// ORDER BY serviceDate DESC LIMIT 12.
+// ═══════════════════════════════════════════════════════════════════
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../lib/generated/prisma"
+  previewFeatures = ["partialIndexes"]
+}
+
+// Prisma 7: connection URLs no longer live in the schema. The CLI
+// (migrate, db push, studio) reads the URL from prisma.config.ts; the
+// runtime client receives a driver adapter in its constructor
+// (see prisma.config.ts and the client setup notes alongside it).
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────
+
+/// The single source of truth for where a reservation sits in its
+/// lifecycle. Future = UPCOMING. Current = SEATED. Past = FINISHED /
+/// NO_SHOW / CANCELLED. No row ever changes tables — only status.
+enum ReservationStatus {
+  UPCOMING
+  /// Some of the party is here, rest en route. Still "on the book"
+  /// (GET returns these alongside UPCOMING) — it's an annotation on
+  /// the wait, not a lifecycle exit.
+  PARTIALLY_ARRIVED
+  SEATED
+  FINISHED
+  NO_SHOW
+  CANCELLED
+}
+
+/// Walk-in lifecycle. SEATED entries graduate into covers on the Shift;
+/// LEFT entries feed the predictor's walk-away/wait-tolerance signal.
+enum WaitlistStatus {
+  WAITING
+  NOTIFIED
+  SEATED
+  LEFT
+}
+
+enum ShiftPeriod {
+  BRUNCH
+  LUNCH
+  DINNER
+}
+
+/// Provenance. Imported OpenTable/Resy CSV history is first-class
+/// training data — flagged, never mixed invisibly with native rows.
+enum BookingSource {
+  MESAOS
+  PHONE
+  WALK_IN
+  OPENTABLE_IMPORT
+  RESY_IMPORT
+  /// Digitised pen-and-paper reservation books (the PDF/photo importer).
+  PAPER_IMPORT
+}
+
+// ─── Tenancy ─────────────────────────────────────────────────────────
+
+/// The account boundary for every operational record. Authentication is
+/// restaurant-scoped; the client never supplies this id directly.
+model Restaurant {
+  id                String   @id @default(cuid())
+  name              String
+  nameKey           String   @unique
+  passcodeHash      String
+  recoveryEmail     String?
+  /// A SECOND credential, separate from the 4-digit staff-facing
+  /// passcode, required by the Console for irreversible acts (delete all
+  /// restaurant data, rotate the restaurant passcode). Null until an
+  /// owner sets one.
+  adminPasscodeHash String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  guests           Guest[]
+  tables           Table[]
+  servers          Server[]
+  reservations     Reservation[]
+  waitlistEntries  WaitlistEntry[]
+  shifts           Shift[]
+  shiftServers     ShiftServer[]
+  floors           Floor[]
+  settings         RestaurantSettings?
+  serviceDayStaff  ServiceDayStaff[]
+  dailyBriefings   DailyBriefing[]
+  shiftForecasts   ShiftForecast[]
+  forecastAccuracy ForecastAccuracy[]
+  subscription     Subscription?
+  invoices         Invoice[]
+  auditLogs        AuditLog[]
+  payoutAccount    PayoutAccount?
+  shiftSales       ShiftSalesEntry[]
+}
+
+// ─── CRM ─────────────────────────────────────────────────────────────
+
+model Guest {
+  id          String   @id @default(cuid())
+  name        String
+  phone       String?  @unique
+  email       String?  @unique
+  vip         Boolean  @default(false)
+  /// Global CRM notes — allergies, seating preferences, occasions.
+  notes       String?
+  /// Denormalized counters, maintained transactionally when a
+  /// reservation reaches a terminal status. Cheap to read in the host
+  /// stand's hot path; recomputable from Reservation if ever suspect.
+  totalVisits Int      @default(0)
+  noShowCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  reservations    Reservation[]
+  waitlistEntries WaitlistEntry[]
+
+  @@unique([restaurantId, phone])
+  @@unique([restaurantId, email])
+  @@index([restaurantId])
+  @@index([restaurantId, vip])
+  @@index([restaurantId, name])
+}
+
+// ─── Floor & staff ───────────────────────────────────────────────────
+
+model Table {
+  id             String  @id @default(cuid())
+  name           String // "T7"
+  capacity       Int
+  shape          String  @default("square")
+  area           String  @default("dining")
+  floorId        String  @default("f1")
+  x              Int     @default(0)
+  y              Int     @default(0)
+  rotation       Int     @default(0)
+  /// Per-table AI opt-out: the section auto-assigner skips this table
+  /// and preserves its manual assignment (see also Floor.isManualOnly).
+  manualOnly     Boolean @default(false)
+  /// Online-reservation exclusion: the public booking site will not
+  /// offer this table. Persisted now, enforced when the site ships.
+  onlineExcluded Boolean @default(false)
+  /// Soft delete: floors get redesigned, but historical reservations
+  /// must keep resolvable table references for the predictor.
+  active         Boolean @default(true)
+
+  // ── Live per-service state ──────────────────────────────────────────
+  // Persisted so a reload mid-service brings the floor back exactly:
+  // who's seated where, bussing flags, and merge groups. Wiped daily at
+  // the service-reset boundary (one hour before opening), enforced
+  // LAZILY on read via liveUpdatedAt — no scheduler needed.
+  status           String    @default("available")
+  party            String?
+  partySize        Int?
+  seatedAt         DateTime?
+  groupId          String?
+  assignedServerId String?
+  liveUpdatedAt    DateTime?
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  reservations ReservationTable[]
+
+  @@unique([restaurantId, floorId, name])
+  @@unique([restaurantId, floorId, name], map: "Table_restaurantId_floorId_name_active_key", where: raw("active"))
+  /// Name uniqueness is enforced by a PARTIAL unique index (active rows
+  /// only) that Prisma cannot express: see
+  /// migration_table_name_partial_unique.sql. Soft-deleted tables keep
+  /// their names for history without blocking re-imported floors.
+  @@index([restaurantId])
+  @@index([restaurantId, active, floorId])
+}
+
+model Server {
+  id         String   @id @default(cuid())
+  name       String
+  /// Floor section tint (hex) — the K-Means assigner's render color.
+  colorHex   String?
+  /// Postgres text[]: ["waiter", "bartender"].
+  roles      String[]
+  /// Host-stand roster toggle — persists across reloads so the shift
+  /// board comes back the way it was left.
+  onShift    Boolean  @default(false)
+  /// Per-server AI opt-out: dedicated to a private room / VIP party —
+  /// the section auto-assigner never drafts them and never reassigns
+  /// tables they hold. Manual assignment remains possible.
+  aiExcluded Boolean  @default(false)
+  /// 4-digit POS login PIN (shared-DB integration). Null = no POS
+  /// access. Plaintext at pilot scale — hash when multi-tenant hardens.
+  pin        String?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  reservations Reservation[]
+  shifts       ShiftServer[]
+
+  @@unique([restaurantId, pin])
+  @@index([restaurantId])
+  @@index([restaurantId, active])
+}
+
+// ─── Reservations (the single lifecycle table) ───────────────────────
+
+model Reservation {
+  id        String            @id @default(cuid())
+  guestId   String
+  guest     Guest             @relation(fields: [guestId], references: [id])
+  partySize Int
+  status    ReservationStatus @default(UPCOMING)
+  source    BookingSource     @default(MESAOS)
+  notes     String?
+  /// Host-flagged priority party. Rides into the client's tag chip
+  /// system and the AI seat route's preference weighting.
+  vip       Boolean           @default(false)
+
+  // ── Lifecycle timestamps ──
+  /// When the booking was created (or original OpenTable/Resy booking
+  /// time for imports).
+  bookedAt     DateTime  @default(now())
+  /// The slot: when the party is due. Future rows are UPCOMING rows
+  /// whose targetTime is ahead of now — no separate table.
+  targetTime   DateTime
+  seatedTime   DateTime?
+  finishedTime DateTime?
+  cancelledAt  DateTime?
+
+  // ── Time-series keys (denormalized, set from targetTime in the
+  //    business's local timezone at write time) ──
+  /// Date-only service day — the primary partition key for history.
+  serviceDate DateTime @db.Date
+  /// 0 = Sunday … 6 = Saturday. The predictor's "past Fridays" key.
+  dayOfWeek   Int
+  /// finishedTime − seatedTime in minutes, materialized when the row
+  /// hits FINISHED, so turn-time aggregation never re-derives from
+  /// timestamps at query time.
+  turnMinutes Int?
+
+  // ── Relations ──
+  serverId String?
+  server   Server?            @relation(fields: [serverId], references: [id])
+  /// Many-to-many: a merged seating ("T8 + T9") is one reservation
+  /// occupying many tables — modeled properly, not as a joined-id
+  /// string.
+  tables   ReservationTable[]
+  shiftId  String?
+  shift    Shift?             @relation(fields: [shiftId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  // The four hot query shapes:
+  @@index([restaurantId])
+  @@index([restaurantId, serviceDate, status]) // "today's board", "Oct 24 history"
+  @@index([restaurantId, dayOfWeek, serviceDate]) // "all past Fridays, newest first"
+  @@index([restaurantId, status, targetTime]) // "next UPCOMING arrivals"
+  @@index([restaurantId, guestId, serviceDate]) // guest visit history
+}
+
+/// Join table: which physical tables a reservation occupies. One row
+/// for a normal booking, N rows for a merge. `isPrimary` marks the
+/// anchor table for display ("T8 + T9" renders under T8's badge).
+model ReservationTable {
+  reservationId String
+  tableId       String
+  isPrimary     Boolean @default(false)
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  table       Table       @relation(fields: [tableId], references: [id])
+
+  @@id([reservationId, tableId])
+  @@index([tableId])
+}
+
+// ─── Waitlist (walk-ins) ─────────────────────────────────────────────
+
+model WaitlistEntry {
+  id        String         @id @default(cuid())
+  /// Optional: casual walk-ins may never become CRM guests.
+  guestId   String?
+  guest     Guest?         @relation(fields: [guestId], references: [id])
+  /// Display name even when no Guest row exists.
+  name      String
+  partySize Int
+  status    WaitlistStatus @default(WAITING)
+  source    BookingSource  @default(WALK_IN)
+
+  arrivalTime       DateTime  @default(now())
+  quotedMinutes     Int?
+  /// arrivalTime + quotedMinutes, materialized for "quote accuracy"
+  /// training without timestamp math.
+  quotedTime        DateTime?
+  seatedTime        DateTime?
+  leftTime          DateTime?
+  /// seatedTime − arrivalTime in minutes, materialized on SEATED.
+  actualWaitMinutes Int?
+
+  serviceDate DateTime @db.Date
+  dayOfWeek   Int
+
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id])
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@index([restaurantId])
+  @@index([restaurantId, serviceDate, status])
+  @@index([restaurantId, status, arrivalTime])
+  @@index([restaurantId, dayOfWeek, serviceDate])
+}
+
+// ─── Shift: the daily rollup the AI predictor trains on ─────────────
+
+/// One row per service period per day ("Dinner on Oct 24"). While the
+/// shift is live these numbers tick up in place (Current data); when
+/// service closes, a finalize job freezes the row (isFinalized) and it
+/// becomes an immutable training snapshot (Past data). Predicted*
+/// columns are written BEFORE service by the AI; actual* columns are
+/// the ground truth it later trains against — every finalized row is a
+/// (prediction, outcome) pair.
+model Shift {
+  id          String      @id @default(cuid())
+  serviceDate DateTime    @db.Date
+  period      ShiftPeriod
+  dayOfWeek   Int
+
+  // ── The prediction (written pre-shift by the AI predictor) ──
+  predictedCovers  Int?
+  predictedServers Int?
+
+  // ── The outcome (live counters → frozen at finalize) ──
+  actualCovers      Int    @default(0)
+  totalReservations Int    @default(0)
+  totalWalkIns      Int    @default(0)
+  noShows           Int    @default(0)
+  cancellations     Int    @default(0)
+  waitlistWalkAways Int    @default(0)
+  avgTurnMinutes    Float?
+  avgWaitMinutes    Float?
+  peakOccupancyPct  Float?
+  serversActual     Int?
+
+  /// Optional exogenous features for the model (weather, local events,
+  /// holidays) — schemaless on purpose; the feature set will evolve
+  /// faster than migrations should.
+  features Json?
+
+  /// Frozen snapshot flag. Finalized rows are the training set;
+  /// unfinalized rows are the live board.
+  isFinalized Boolean   @default(false)
+  finalizedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  reservations    Reservation[]
+  waitlistEntries WaitlistEntry[]
+  servers         ShiftServer[]
+
+  @@unique([restaurantId, serviceDate, period])
+  @@index([restaurantId])
+  @@index([restaurantId, dayOfWeek, period, serviceDate]) // "past Fridays' dinners, newest first"
+  @@index([restaurantId, isFinalized, serviceDate]) // training-set scans
+}
+
+/// Many-to-many with payload: which servers actually worked a shift and
+/// what they handled — the ground truth the K-Means assigner and the
+/// staffing predictor are scored against.
+model ShiftServer {
+  shiftId      String
+  serverId     String
+  coversServed Int    @default(0)
+  tablesWorked Int    @default(0)
+
+  shift  Shift  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  server Server @relation(fields: [serverId], references: [id])
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@id([shiftId, serverId])
+  @@index([restaurantId])
+  @@index([restaurantId, serverId])
+}
+
+// ─── Floor & configuration ───────────────────────────────────────────
+
+/// Floors are layout containers ("Main Floor", "Patio"). Relation-free
+/// by design: Table.floorId is a plain string, so adding this model to
+/// an existing database needs no backfill. Soft-deleted like tables.
+model Floor {
+  id             String  @id
+  name           String
+  isManualOnly   Boolean @default(false)
+  /// Online-reservation exclusion: the public booking site will not
+  /// offer this floor. Persisted now, enforced when the site ships.
+  onlineExcluded Boolean @default(false)
+  sortOrder      Int     @default(0)
+  active         Boolean @default(true)
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@index([restaurantId])
+}
+
+/// Singleton (id "main"). Typed columns only for values other systems
+/// consume (the Timeline reads hours; role chips read roles); the
+/// host-stand preference pile (24h clock, sound alerts, turn-time
+/// defaults, ...) lives in `prefs` Json so new toggles never require a
+/// migration — same rationale as Shift.features.
+model RestaurantSettings {
+  id           String   @id @default("main")
+  openMinutes  Int?
+  closeMinutes Int?
+  roles        String[] @default(["waiter", "bartender"])
+  prefs        Json?
+  updatedAt    DateTime @updatedAt
+
+  restaurantId String     @unique
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+}
+
+/// Server-side cache for a restaurant's generated pre-shift briefing. This
+/// intentionally lives outside settings prefs so client autosaves cannot race it.
+model DailyBriefing {
+  id           String     @id @default(cuid())
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+  date         String
+  payload      Json
+  createdAt    DateTime   @default(now())
+
+  @@unique([restaurantId, date])
+}
+
+/// Durable, tenant-scoped predictor output. Unlike the former process cache,
+/// this is available to the co-pilot, briefing, and scheduled jobs across
+/// serverless instances without ever starting fresh web research on read.
+model ShiftForecast {
+  id           String     @id @default(cuid())
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+  date         String
+  /// "manual" is a Predictor-tab run; weekly and autocorrect are scheduler
+  /// outputs. Kept as a string so this additive rollout needs no enum DDL.
+  source       String
+  payload      Json
+  createdAt    DateTime   @default(now())
+
+  // Forecasts are append-only revisions. Readers choose the strongest
+  // source for a service date (manual > autocorrect > weekly), then newest.
+  // Keeping revisions means a weekly job can never erase a manual run.
+  @@index([restaurantId, date, source, createdAt])
+  @@index([restaurantId, createdAt])
+}
+
+/// Deterministic after-service scoring of a ShiftForecast against recorded
+/// outcomes. A unique daily row prevents an anomalous close from repeatedly
+/// triggering the same restaurant's corrective weekly refresh.
+model ForecastAccuracy {
+  id             String     @id @default(cuid())
+  restaurantId   String
+  restaurant     Restaurant @relation(fields: [restaurantId], references: [id])
+  date           String
+  predicted      Json
+  actual         Json
+  errorScore     Float
+  triggeredRerun Boolean    @default(false)
+  createdAt      DateTime   @default(now())
+
+  @@unique([restaurantId, date])
+  @@index([restaurantId, createdAt])
+}
+
+/// Per-service-day staff record: who was on shift and how the floor was
+/// sectioned that day. Keyed by service date so each day is independent —
+/// today's roster no longer bleeds into future/past views. Past records
+/// are immutable history; future records are editable plans. Doubles as
+/// the AI predictor's per-shift section-history feed (which servers took
+/// which tables, and — joined to reservations — how they turned).
+model ServiceDayStaff {
+  serviceDate DateTime @db.Date
+  /// serverId[] on shift that day (Postgres text[]).
+  roster      String[]
+  /// { tableId: serverId } section map. Schemaless — table set changes
+  /// with the floor layout, so a migration per re-section is wrong.
+  sections    Json?
+  updatedAt   DateTime @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@id([restaurantId, serviceDate])
+  @@index([restaurantId])
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// POS + Shift-Link (shared-DB integration, Aug 2026)
+//
+// One database, two apps. The POS (Travola-POS repo) points its
+// DATABASE_URL at this same database; the models below are the POS's
+// tables plus the shared communication layer. MIGRATION OWNERSHIP:
+// this repo is the ONLY one that runs `prisma migrate` — the POS repo
+// mirrors the models it touches and only ever runs `prisma generate`.
+//
+// POS models deliberately carry restaurantId as a plain String (no
+// Restaurant relation): additive rollout with zero changes to existing
+// relation lists, same tenant-guard discipline in code.
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── Shared communication layer ──────────────────────────────────────
+
+/// The OS ↔ POS event bus, append-only. Every service action either app
+/// takes lands here; the other app (and the shift-intel layer) tails it
+/// by `seq` cursor — same 3–5s polling pattern as the KDS. Events are
+/// ALSO the raw feed the predictor mines (course pacing, pay-to-clear).
+model ServiceEvent {
+  id           String   @id @default(cuid())
+  /// Monotonic cursor for cheap `?since=` polling (BIGSERIAL).
+  seq          BigInt   @unique @default(autoincrement())
+  restaurantId String
+  /// "os" | "pos" — which app emitted it.
+  source       String
+  /// TABLE_SEATED | TABLE_FINISHED | TABLE_CLEARED | TABLE_MOVED |
+  /// TABLES_MERGED | TABLES_UNMERGED | SECTION_ASSIGNED |
+  /// SECTIONS_ASSIGNED | LAYOUT_UPDATED | CHECK_OPENED | COURSE_FIRED |
+  /// COURSE_BUMPED | CHECK_PAID | CHECK_CLOSED | NOTE
+  type         String
+  /// Reservation/waitlist id when known — the party seam.
+  partyKey     String?
+  tableIds     String[]
+  serverId     String?
+  checkId      String?
+  serviceDate  DateTime @db.Date
+  payload      Json?
+  createdAt    DateTime @default(now())
+
+  @@index([restaurantId, seq])
+  @@index([restaurantId, serviceDate, type])
+}
+
+/// One seated party from seat → clear: the analytic unit shift
+/// intelligence trains on. Maintained incrementally by BOTH apps as
+/// events happen (floor writes the seating spine, POS writes the money
+/// and course pacing). Reservation.turnMinutes keeps working as before;
+/// this row adds the POS-enriched picture.
+model TableSession {
+  id                 String    @id @default(cuid())
+  restaurantId       String
+  serviceDate        DateTime  @db.Date
+  partyKey           String?
+  partyName          String?
+  tableIds           String[]
+  primaryTableId     String
+  serverId           String?
+  guestCount         Int?
+  seatedAt           DateTime
+  firstOrderAt       DateTime?
+  lastFireAt         DateTime?
+  lastBumpAt         DateTime?
+  checkPaidAt        DateTime?
+  clearedAt          DateTime?
+  turnMinutes        Int?
+  paidToClearMinutes Int?
+  checkId            String?
+  subtotalCents      Int?
+  totalCents         Int?
+  tipCents           Int?
+  /// Per-person average, derived at close: totalCents / guestCount.
+  ppaCents           Int?
+  /// [{course, firedAt, bumpedAt}] — course pacing detail.
+  courseTimings      Json?
+  /// [{at, fromTableIds, toTableIds}] — moves/merges history.
+  moves              Json?
+  /// "floor" | "pos" — which app created the session.
+  origin             String    @default("floor")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([restaurantId, serviceDate])
+  @@index([restaurantId, primaryTableId, clearedAt])
+  @@index([restaurantId, checkId])
+}
+
+// ─── POS catalog ─────────────────────────────────────────────────────
+
+model MenuCategory {
+  id           String     @id @default(cuid())
+  restaurantId String
+  name         String
+  sortOrder    Int        @default(0)
+  active       Boolean    @default(true)
+  items        MenuItem[]
+
+  @@index([restaurantId])
+}
+
+model MenuItem {
+  id             String          @id @default(cuid())
+  restaurantId   String
+  categoryId     String
+  category       MenuCategory    @relation(fields: [categoryId], references: [id])
+  name           String
+  priceCents     Int
+  station        String
+  active         Boolean         @default(true)
+  sortOrder      Int             @default(0)
+  ephemeral      Boolean         @default(false)
+  expiresAt      DateTime?
+  description    String          @default("")
+  createdBy      String          @default("")
+  modifierGroups ModifierGroup[]
+
+  @@index([restaurantId, categoryId])
+}
+
+model ModifierGroup {
+  id           String     @id @default(cuid())
+  restaurantId String
+  name         String
+  minSelect    Int        @default(0)
+  maxSelect    Int        @default(1)
+  modifiers    Modifier[]
+  items        MenuItem[]
+
+  @@index([restaurantId])
+}
+
+model Modifier {
+  id         String        @id @default(cuid())
+  groupId    String
+  group      ModifierGroup @relation(fields: [groupId], references: [id])
+  name       String
+  priceCents Int           @default(0)
+  sortOrder  Int           @default(0)
+}
+
+// ─── POS orders ──────────────────────────────────────────────────────
+
+model Check {
+  id            String      @id @default(cuid())
+  restaurantId  String
+  /// Reservation/waitlist id from live floor state — the party seam.
+  partyKey      String?
+  tableLabel    String
+  /// Table.id (the SHARED floor table) when opened from the floor view.
+  tableId       String?
+  /// Server.id (shared staff table; PIN login).
+  serverId      String?
+  serverName    String      @default("")
+  status        String      @default("open")
+  openedAt      DateTime    @default(now())
+  closedAt      DateTime?
+  subtotalCents Int         @default(0)
+  taxCents      Int         @default(0)
+  tipCents      Int         @default(0)
+  totalCents    Int         @default(0)
+  guestCount    Int         @default(1)
+  currentCourse Int         @default(1)
+  items         CheckItem[]
+  payments      Payment[]
+
+  @@index([restaurantId, status])
+  @@index([restaurantId, openedAt])
+  @@index([restaurantId, tableId, status])
+}
+
+model CheckItem {
+  id           String    @id @default(cuid())
+  checkId      String
+  check        Check     @relation(fields: [checkId], references: [id])
+  menuItemId   String
+  nameSnapshot String
+  priceCents   Int
+  quantity     Int       @default(1)
+  seat         Int?
+  course       Int       @default(1)
+  modifiers    Json
+  station      String
+  state        String    @default("held")
+  note         String    @default("")
+  firedAt      DateTime?
+  bumpedAt     DateTime?
+  voidReason   String?
+
+  @@index([checkId])
+  @@index([station, state])
+}
+
+model Payment {
+  id                    String   @id @default(cuid())
+  restaurantId          String
+  checkId               String
+  check                 Check    @relation(fields: [checkId], references: [id])
+  method                String
+  amountCents           Int
+  tipCents              Int      @default(0)
+  stripePaymentIntentId String?
+  status                String   @default("captured")
+  createdAt             DateTime @default(now())
+
+  @@index([restaurantId, createdAt])
+}
+
+// ─── POS stations, add-ons, settings ─────────────────────────────────
+
+model AddOn {
+  id           String    @id @default(cuid())
+  restaurantId String
+  menuItemId   String?
+  name         String
+  priceCents   Int       @default(0)
+  ephemeral    Boolean   @default(false)
+  expiresAt    DateTime?
+  createdBy    String    @default("")
+  createdAt    DateTime  @default(now())
+
+  @@index([restaurantId, menuItemId])
+}
+
+model Station {
+  id           String  @id @default(cuid())
+  restaurantId String
+  key          String
+  name         String
+  kind         String  @default("kds")
+  printerToken String? @unique
+
+  @@unique([restaurantId, key])
+}
+
+model PosSettings {
+  id            String @id @default(cuid())
+  restaurantId  String @unique
+  taxRateBps    Int    @default(840)
+  tipPresets    Json   @default("[18, 20, 25]")
+  receiptFooter String @default("")
+}
+
+/// A menu upload in review. The manager uploads a PDF or photo, the
+/// extraction pipeline produces a draft, and NOTHING touches the live
+/// catalog until they press Save. The draft lives here rather than in
+/// page state so a 120-item menu can be reviewed across a break, a
+/// refresh, or a dead tablet battery — and so there is a record of what
+/// was imported and by whom.
+///
+/// `payload` holds the whole reviewable draft (items + shared modifier
+/// group definitions); it is deliberately schemaless because the shape
+/// of a draft will change faster than migrations should. The uploaded
+/// file itself is NOT stored: it has served its purpose once extracted,
+/// and keeping menus as blobs in Postgres buys nothing.
+model MenuImport {
+  id           String    @id @default(cuid())
+  restaurantId String
+  /// draft | committed | discarded
+  status       String    @default("draft")
+  /// Original filename, for the manager to recognise their own upload.
+  sourceName   String    @default("")
+  /// "text" (PDF text layer) | "vision" (rasterised pages / photos)
+  sourceKind   String    @default("text")
+  pageCount    Int       @default(0)
+  itemCount    Int       @default(0)
+  /// Server.name snapshot of whoever uploaded it.
+  createdBy    String    @default("")
+  payload      Json
+  /// How the manager resolved it: merge | replace (set at commit).
+  commitMode   String?
+  committedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([restaurantId, status, createdAt])
+}
+
+// ─── Console: account, subscription, billing, audit ──────────────────
+// Owned by the Travola Console app (separate repo + Vercel project) but
+// migrated here, because this repo owns every migration for the shared
+// database. The Console reads and writes these; the floor app and POS
+// ignore them.
+
+/// One row per restaurant. Provider-agnostic on purpose: `provider` is
+/// "stub" until a real payment processor is connected, at which point
+/// the same row carries the processor's ids and the Console keeps
+/// rendering from these columns rather than from live API calls — a
+/// billing page must not go blank when the processor has a bad minute.
+model Subscription {
+  id           String     @id @default(cuid())
+  restaurantId String     @unique
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  plan     String @default("standard") // starter | standard | pro
+  status   String @default("trialing") // trialing | active | past_due | canceled | paused
+  interval String @default("month") // month | year
+
+  priceCents Int    @default(0)
+  currency   String @default("usd")
+  seats      Int    @default(1)
+
+  trialEndsAt        DateTime?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean   @default(false)
+  canceledAt         DateTime?
+  cancelReason       String?
+
+  provider               String  @default("stub") // stub | stripe
+  providerCustomerId     String?
+  providerSubscriptionId String?
+
+  /// Billing contact + address snapshot. Snapshot, not join: an invoice
+  /// must still print the address it was issued to.
+  billingContact Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Issued invoices, written by the billing provider adapter.
+model Invoice {
+  id           String     @id @default(cuid())
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  number      String
+  status      String    @default("paid") // draft | open | paid | void | uncollectible
+  amountCents Int       @default(0)
+  taxCents    Int       @default(0)
+  totalCents  Int       @default(0)
+  currency    String    @default("usd")
+  periodStart DateTime?
+  periodEnd   DateTime?
+  issuedAt    DateTime  @default(now())
+  paidAt      DateTime?
+  description String    @default("")
+  hostedUrl   String?
+  pdfUrl      String?
+
+  provider          String  @default("stub")
+  providerInvoiceId String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([restaurantId, number])
+  @@index([restaurantId, issuedAt])
+}
+
+/// Every consequential Console act: credential changes, staff removal,
+/// plan changes, exports, deletions. This is what lets an owner answer
+/// "who deleted that?" six months later.
+model AuditLog {
+  id           String     @id @default(cuid())
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  action  String
+  actor   String @default("")
+  summary String @default("")
+  detail  Json?
+  ip      String @default("")
+
+  createdAt DateTime @default(now())
+
+  @@index([restaurantId, createdAt])
+}
+
+/// A generated data export. The file is streamed to the browser and
+/// never stored; this row records that an export happened, when, and how
+/// much left the building.
+model DataExport {
+  id           String   @id @default(cuid())
+  restaurantId String
+  format       String   @default("json")
+  scope        String   @default("all")
+  rowCount     Int      @default(0)
+  byteCount    Int      @default(0)
+  requestedBy  String   @default("")
+  createdAt    DateTime @default(now())
+
+  @@index([restaurantId, createdAt])
+}
+
+// ─── Home-owned: Stripe Connect payouts ───────────────────────────
+
+/// Where a restaurant's card revenue lands.
+///
+/// Travola runs Stripe Connect **Express**: each restaurant gets its own
+/// Stripe account, completes Stripe's own KYC, and money moves from the
+/// guest's card to the restaurant's bank without Travola ever taking
+/// custody of it. That is a deliberate choice — a platform that touches
+/// restaurant revenue inherits money-transmission problems it does not
+/// want, and an owner is far more willing to enter an SSN on a Stripe
+/// page than on ours.
+///
+/// This row is a CACHE of what Stripe says plus the preferences the
+/// owner set here. It is written from the Connect API and from the
+/// account.updated webhook, and every screen renders from these columns
+/// rather than from a live API call — a settings page must not go blank
+/// because Stripe had a bad minute.
+model PayoutAccount {
+  id           String     @id @default(cuid())
+  restaurantId String     @unique
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  /// "stub" until STRIPE_SECRET_KEY is set, then "stripe". Same shape as
+  /// Subscription.provider so both halves of Phase 1 switch on together.
+  provider        String  @default("stub")
+  /// The Connect account id (acct_...). Null before onboarding starts.
+  stripeAccountId String? @unique
+
+  /// not_started | onboarding | restricted | active | disabled
+  /// Derived from Stripe's flags on every sync, never set by hand.
+  status String @default("not_started")
+
+  /// Stripe's own three booleans, cached verbatim. `payoutsEnabled` is
+  /// the one that decides whether money actually moves; the other two
+  /// are what explains WHY when it does not.
+  detailsSubmitted Boolean @default(false)
+  chargesEnabled   Boolean @default(false)
+  payoutsEnabled   Boolean @default(false)
+
+  /// What Stripe is still waiting for, and when. Rendered as a checklist
+  /// so "restricted" is never a dead end the owner cannot act on.
+  requirementsDue   Json?
+  requirementsDueAt DateTime?
+  disabledReason    String?
+
+  /// The destination, as much of it as is safe to keep. Never the full
+  /// account number — Stripe holds that and we only ever show the tail.
+  bankName     String?
+  bankLast4    String?
+  bankCurrency String?
+  country      String?
+
+  // ── Owner preferences ──────────────────────────────────────────
+  /// daily | weekly | monthly | manual
+  payoutInterval      String @default("daily")
+  /// 0-6, Sunday=0. Only meaningful when payoutInterval is weekly.
+  payoutWeeklyAnchor  Int    @default(5)
+  /// 1-31. Only meaningful when payoutInterval is monthly. Stripe clamps
+  /// 29-31 to the last day of a short month; the UI says so.
+  payoutMonthlyAnchor Int    @default(1)
+  /// Days Stripe holds funds before sending them. "minimum" is stored as
+  /// null and means "whatever Stripe's floor is for this country".
+  payoutDelayDays     Int?
+
+  /// What the guest sees on their card statement. Stripe validates this
+  /// hard (5-22 chars, no < > \ ' " *), so we validate it here first and
+  /// say why rather than surfacing a raw API error.
+  statementDescriptor String?
+
+  /// Where Stripe sends "we sent your deposit" and "your payout failed".
+  /// Falls back to Restaurant.recoveryEmail when null.
+  payoutNotifyEmail String?
+
+  /// How this restaurant handles tips. Travola CANNOT move a tip to a
+  /// server's own bank account — tips land with the rest of the card
+  /// revenue and are distributed by the restaurant. This column records
+  /// what they intend so the POS and reports can say it out loud.
+  /// with_payout | cash_nightly | payroll
+  tipHandling String  @default("with_payout")
+  tipNote     String?
+
+  /// Last successful read from Stripe. Drives the "as of" line, and stops
+  /// a stale cache being presented as live truth.
+  lastSyncedAt  DateTime?
+  /// Last non-fatal sync failure, kept so a silently stale row is visible.
+  lastSyncError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+// ─── Pantry-owned: the shift close-out ────────────────────────────
+
+/// One row per service, typed by the manager at the end of the night.
+///
+/// This exists because Travola has no POS. Without it the platform knows
+/// how many people came (the floor app books them) but not what they
+/// spent — which silently kills average bill, revenue, growth and
+/// RevPASH on the analysis tab. A sixty-second form restores all four.
+///
+/// `source` is the whole point of the design. Today every row is
+/// `manual`. When the Toast and Square integrations land they write rows
+/// here with `toast` / `square` instead, and nothing downstream changes:
+/// the analysis tab, the forecast scoring and the food-cost maths all
+/// keep reading this one table. The typing stops; the schema does not
+/// move.
+///
+/// Money is integer cents throughout. Labour is stored in MINUTES rather
+/// than decimal hours so nothing in the stack has to round a float that
+/// ends up in a cost percentage.
+model ShiftSalesEntry {
+  id           String     @id @default(cuid())
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  /// The SERVICE date, not the calendar date the row was typed. A close
+  /// out done at 1am Saturday belongs to Friday's service, and every
+  /// report in the product depends on that being true.
+  serviceDate DateTime @db.Date
+  /// lunch | dinner | all_day. Most single-service restaurants only ever
+  /// write all_day; the split exists so a lunch-and-dinner house is not
+  /// forced to merge two very different services into one number.
+  period      String   @default("all_day")
+
+  /// Net of tax, gross of tip. The denominator for every cost ratio.
+  netSalesCents Int
+
+  /// Optional but heavily encouraged: without the split there is one
+  /// blended cost percentage, and food cost and pour cost behave so
+  /// differently that a blended number hides both.
+  foodSalesCents Int?
+  bevSalesCents  Int?
+
+  compsCents     Int @default(0)
+  discountsCents Int @default(0)
+
+  /// Reservations know the booked covers; this is the corrected figure
+  /// including walk-ins. Null means "trust the floor app's count".
+  covers Int?
+
+  /// Minutes, not hours. Unlocks prime cost when present.
+  laborMinutes   Int?
+  laborCostCents Int?
+
+  /// manual | toast | square | import
+  source    String @default("manual")
+  enteredBy String @default("")
+
+  /// "Power out 7-8pm." "80-top walked in." Free text, and the single
+  /// most useful column here: it is what turns a forecast miss from a
+  /// mystery into an explanation.
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One row per service per day. A second close-out for the same
+  /// service is an edit, never a duplicate that silently doubles a
+  /// month's revenue.
+  @@unique([restaurantId, serviceDate, period])
+  @@index([restaurantId, serviceDate])
+}

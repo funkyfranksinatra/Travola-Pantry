@@ -1,0 +1,183 @@
+/* ============================================================================
+   Travola Home — Midnight
+   ----------------------------------------------------------------------------
+   The colour system is lifted VERBATIM from Travola-OS and Travola-POS so the
+   three products read as one. Every bg-*, text-*, border-*, ring-* utility the
+   Console uses resolves to a variable defined here, exactly as it does there.
+
+   Two layers, deliberately different:
+
+   · CHROME (surfaces, type, borders) uses the floor app's calm, low-strain
+     values unchanged. A page a manager stares at for an hour should not shout.
+
+   · DATA MARKS use their own validated set. Chart marks have a job the chrome
+     does not: they must stay separable from each other on a dark surface, for
+     colour-blind readers too. The chrome indigo (#818cf8) sits above the
+     dark-mode lightness band for a mark and its neighbours fail CVD
+     separation, so the series colours are stepped versions of the SAME hues,
+     checked with the palette validator rather than by eye:
+
+       worst adjacent pair  ΔE 10.1 (deutan) · 23.7 (normal vision)
+       all four             ≥ 3:1 contrast on #1e1e22, OKLCH L 0.48–0.67
+
+   Status green and red are RESERVED for direction — a rise or a fall — and
+   never used as a series colour. They always ship with an arrow and a number,
+   so direction is never carried by colour alone.
+   ========================================================================== */
+
+@import "tailwindcss";
+
+@theme {
+  /* Canvas + elevation ladder. Depth comes from surface FILL, not outlines. */
+  --color-bg:         #121214;
+  --color-panel:      #161619;
+  --color-panel-card: #1e1e22;
+  --color-panel-up:   #27272c;
+
+  /* Type: soft off-white primary, muted secondary. */
+  --color-ink-50:  #e4e4e7;
+  --color-ink-200: #c4c4cc;
+  --color-ink-300: #b0b0ba;
+  --color-ink-400: #a1a1aa;
+
+  /* Faint hairlines, never high-contrast strokes. */
+  --color-border:    rgba(244,244,245,0.07);
+  --color-border-hi: rgba(244,244,245,0.13);
+
+  /* Accent — the same desaturated indigo the other two apps use. */
+  --color-ai:       #818cf8;
+  --color-ai-bg:    rgba(129,140,248,0.12);
+  --color-ai-muted: rgba(129,140,248,0.10);
+
+  /* Semantic states, shared with the floor app's reservation colours. */
+  --color-state-avail:      #52c794;
+  --color-state-availBg:    rgba(82,199,148,0.12);
+  --color-state-seated:     #ec7e7e;
+  --color-state-seatedBg:   rgba(236,126,126,0.12);
+  --color-state-reserved:   #a896e0;
+  --color-state-reservedBg: rgba(168,150,224,0.12);
+  --color-state-dining:     #e0b063;
+  --color-state-diningBg:   rgba(224,176,99,0.12);
+
+  /* ── Data marks (validated; see the header note) ────────────────────── */
+  --color-viz-1: #757bff;  /* indigo — always the primary series          */
+  --color-viz-2: #d97800;  /* amber                                        */
+  --color-viz-3: #00af73;  /* green                                        */
+  --color-viz-4: #ca59e4;  /* magenta                                      */
+
+  /* Sequential ramp for magnitude (the heatmap). One hue, dark → light,
+     monotonic in OKLCH lightness. Never a rainbow. */
+  --color-seq-1: #24275a;
+  --color-seq-2: #373b83;
+  --color-seq-3: #4b50b0;
+  --color-seq-4: #6168d9;
+  --color-seq-5: #7881ff;
+
+  --color-black: #0c0c0e;
+  --color-white: #f3f3f5;
+}
+
+@theme inline {
+  --font-sans:    var(--font-geist-sans);
+  --font-mono:    var(--font-geist-mono);
+  --font-display: var(--font-geist-sans);
+}
+
+:root {
+  --background: var(--color-bg);
+  --foreground: var(--color-ink-50);
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink-50);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button, a, [role="button"], summary {
+  transition: background-color .15s ease, border-color .15s ease,
+              color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+
+:focus-visible { outline: 2px solid var(--color-ai); outline-offset: 2px; }
+::selection { background: var(--color-ai-bg); color: var(--color-ink-50); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--color-panel-up) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--color-panel-up);
+  border-radius: 9999px;
+  border: 2px solid var(--color-bg);
+}
+*::-webkit-scrollbar-thumb:hover { background: #34343b; }
+
+/* ── Surfaces ───────────────────────────────────────────────────────────
+   One card, one radius, one hairline. The visual interest comes from the
+   content — floor plans, charts, ranked bars — not from decorating the
+   containers. */
+.card {
+  background: var(--color-panel-card);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+}
+.card-hover:hover { border-color: var(--color-border-hi); }
+
+/* A card whose subject is a single figure gets a faint wash of the accent
+   from the top, so a wall of tiles has a light source rather than reading
+   as a spreadsheet. */
+.card-lit {
+  background:
+    linear-gradient(180deg, rgba(129,140,248,0.07) 0%, rgba(129,140,248,0) 62%),
+    var(--color-panel-card);
+}
+
+.label {
+  font-size: 0.6875rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--color-ink-400);
+  font-weight: 600;
+}
+
+.figure {
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  font-size: clamp(1.75rem, 2.6vw, 2.25rem);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.figure-sm { font-size: 1.375rem; font-weight: 650; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Tables: hairline rules, right-aligned figures, no zebra. Alignment lives
+   in the markup — a `.text-right` here would lose to this selector and leave
+   every numeric header a column adrift from its figures. */
+.data-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.data-table th {
+  font-size: 0.6875rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--color-ink-400);
+  font-weight: 600;
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.data-table td { padding: 0.55rem 0.5rem; border-bottom: 1px solid rgba(244,244,245,0.04); }
+.data-table tbody tr:last-child td { border-bottom: 0; }
+.data-table tbody tr:hover td { background: rgba(244,244,245,0.02); }
+
+/* A metric with nothing behind it must LOOK like it has nothing behind it. */
+.awaiting .figure, .awaiting .figure-sm { opacity: 0.3; font-weight: 400; }
+
+@media print {
+  body { background: #fff; color: #000; }
+  .no-print { display: none !important; }
+  .card { border-color: #ddd; background: #fff; }
+}
