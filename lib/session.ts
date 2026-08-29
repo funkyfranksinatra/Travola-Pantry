@@ -61,11 +61,21 @@ function decode(value?: string | null): Session | null {
 
 function cookieValue(req: Request) {
   const header = req.headers.get("cookie") || "";
-  return header
+  const fromCookie = header
     .split(";")
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${SESSION_COOKIE}=`))
     ?.slice(SESSION_COOKIE.length + 1);
+  if (fromCookie) return fromCookie;
+  // The native counting app cannot rely on cross-origin cookies — mobile
+  // webviews drop them unpredictably — so it carries the SAME signed
+  // value in an Authorization header instead. One token format, two
+  // transports: nothing about verification changes, and a bearer token
+  // is exactly as forgeable as the cookie was (not at all, without the
+  // secret).
+  const auth = req.headers.get("authorization") || "";
+  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  return undefined;
 }
 
 /** Read the restaurant id from a Request (API routes, proxy). */
@@ -90,6 +100,12 @@ export function adminWindowRemaining(value?: string | null) {
   const session = decode(value);
   if (!session?.adm) return 0;
   return Math.max(0, ADMIN_WINDOW_MS - (Date.now() - session.adm));
+}
+
+/** The signed session value itself, for clients that store it as a
+ *  bearer token rather than receiving it as a cookie. */
+export function createSessionToken(restaurantId: string) {
+  return encode({ restaurantId, iat: Date.now() });
 }
 
 export function setSession(response: NextResponse, restaurantId: string, admin = false) {

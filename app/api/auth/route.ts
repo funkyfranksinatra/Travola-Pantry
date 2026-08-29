@@ -6,7 +6,7 @@
 // sets a code once and it works everywhere.
 import { NextResponse } from "next/server";
 import { allowAttempt, restaurantByCredentials } from "@/lib/restaurant-auth";
-import { clearSession, setSession } from "@/lib/session";
+import { clearSession, createSessionToken, setSession } from "@/lib/session";
 import { audit } from "@/lib/audit";
 import { configMessage, isConfigurationFailure, operationalError } from "@/lib/env";
 
@@ -34,8 +34,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "That restaurant name and code do not match." }, { status: 401 });
     }
     await audit({ restaurantId: restaurant.id, action: "auth.sign_in", summary: "Signed in to Travola Pantry", req: request });
+    // The native counting app asks for the session as a TOKEN, because
+    // mobile webviews drop cross-origin cookies unpredictably. Same
+    // signed value the cookie would carry; the client stores it and
+    // sends it back as Authorization: Bearer.
+    const wantsToken = body?.client === "mobile";
     return setSession(
-      NextResponse.json({ ok: true, restaurant: { id: restaurant.id, name: restaurant.name } }),
+      NextResponse.json({
+        ok: true,
+        restaurant: { id: restaurant.id, name: restaurant.name },
+        ...(wantsToken ? { token: createSessionToken(restaurant.id) } : {}),
+      }),
       restaurant.id,
     );
   } catch (error) {
@@ -51,3 +60,5 @@ export async function POST(request: Request) {
 export async function DELETE() {
   return clearSession(NextResponse.json({ ok: true }));
 }
+
+export { corsOptions as OPTIONS } from "@/lib/cors";

@@ -43,3 +43,5 @@ export async function GET() {
     { status: ok ? 200 : 503 },
   );
 }
+
+export { corsOptions as OPTIONS } from "@/lib/cors";

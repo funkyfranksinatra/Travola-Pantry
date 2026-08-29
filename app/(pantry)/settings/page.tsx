@@ -28,10 +28,10 @@ export default function SettingsPage() {
       <Card className="p-5">
         <SectionHeading title="The staff counting app" note="" />
         <p className="text-sm text-ink-200 max-w-2xl leading-relaxed">
-          The Count tab already works one-handed on any phone — staff sign in with the restaurant
-          name and code, count in shelf order, and submit for approval. A native iOS and Android
-          wrapper around that same flow is planned but not built; nothing about counting changes
-          when it lands, it just gets an icon on the home screen.
+          Staff can count from the Count tab on any phone, or from the Travola Pantry app for
+          iOS and Android — same sign-in, same shelf order, same approval queue. The app keeps
+          counting with no signal: entries queue on the phone and send themselves when it
+          returns, so a dead spot in the walk-in costs nothing.
         </p>
       </Card>
 
@@ -39,6 +39,7 @@ export default function SettingsPage() {
         <SectionHeading title="Not built yet, on purpose" note="Shelved for later architecting rather than half-shipped." />
         <ul className="space-y-2.5 text-sm text-ink-200 max-w-2xl">
           {[
+            ["App-store listings", "The counting app builds today from the travola-pantry-mobile repo (Android Studio / Xcode). Play Store and App Store submission is a release step, not a build step."],
             ["Live POS connectors", "Theoretical usage already reads item-level sales from the shared database. Toast and Square integrations will feed the same tables; the variance engine does not change."],
             ["General-ledger posting", "Approved counts freeze a valuation. Posting that to a GL needs an accounting integration (QuickBooks et al) that does not exist yet — the valuation is ready for it."],
             ["Invoice scanning", "Receiving is typed today. The menu importer's photo-reading machinery will point at invoices later."],

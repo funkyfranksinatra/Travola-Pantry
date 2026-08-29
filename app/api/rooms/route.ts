@@ -91,3 +91,5 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ error: "Unknown action." }, { status: 400 });
 }
+
+export { corsOptions as OPTIONS } from "@/lib/cors";
