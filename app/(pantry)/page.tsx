@@ -139,25 +139,24 @@ export default function TodayPage() {
         </Card>
       )}
 
-      {/* ── Honest about what is not built ── */}
+      {/* ── What is built now ── */}
       <Card className="p-5">
         <SectionHeading
-          title="Coming next"
-          note="Pantry is being built in stages. This is what is not here yet, so nothing on this page has to pretend."
+          title="Inventory"
+          note="Rooms, counts, purchases, recipes and variance are live. What remains shelved is listed under Settings, honestly."
         />
         <ul className="grid gap-3 sm:grid-cols-2">
           {[
-            ["Items", "The catalog — units, storage areas, par levels. Imported from a spreadsheet or a photo of your count sheet."],
-            ["Count", "Shelf-to-sheet counting that works offline in the walk-in."],
-            ["Order", "Suggested orders from par against the covers forecast."],
-            ["Reports", "Food cost, pour cost, waste and variance."],
-          ].map(([title, detail]) => (
-            <li key={title} className="rounded-xl border border-border bg-panel-up/30 px-4 py-3">
-              <span className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-ink-50">{title}</span>
-                <Chip tone="neutral">not built</Chip>
-              </span>
-              <span className="block text-xs text-ink-400 mt-1.5 leading-relaxed">{detail}</span>
+            ["Inventory", "/inventory", "The storage map — rooms laid out as the building is, items in shelf order."],
+            ["Count", "/count", "Phone-first counting in shelf order; staff submit, a manager approves."],
+            ["Purchases", "/purchases", "Order → receive → reconcile, with the three-way match and price rippling."],
+            ["Recipes", "/recipes", "Plate costs from live ingredient prices, and actual-vs-theoretical variance."],
+          ].map(([title, href, detail]) => (
+            <li key={title}>
+              <Link href={href} className="block rounded-xl border border-border bg-panel-up/30 px-4 py-3 hover:border-ai/40 hover:bg-panel-up transition-colors">
+                <span className="text-sm font-semibold text-ink-50">{title} →</span>
+                <span className="block text-xs text-ink-400 mt-1.5 leading-relaxed">{detail}</span>
+              </Link>
             </li>
           ))}
         </ul>

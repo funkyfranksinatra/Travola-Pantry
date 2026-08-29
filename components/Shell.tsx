@@ -16,8 +16,13 @@ import { useEffect, useState } from "react";
 
 const TABS = [
   { href: "/", label: "Today" },
+  { href: "/inventory", label: "Inventory" },
+  { href: "/count", label: "Count" },
+  { href: "/purchases", label: "Purchases" },
+  { href: "/recipes", label: "Recipes" },
   { href: "/close-out", label: "Close-out" },
   { href: "/history", label: "History" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function Shell({
@@ -79,7 +84,10 @@ export function Shell({
 
         {/* One type system: mono at 11px throughout, hierarchy by weight
             and colour alone. Identical to Home's strip. */}
-        <div className="ml-auto flex items-center gap-3 sm:gap-4 shrink-0 font-mono text-[11px] leading-none">
+        {/* bg + z: on a phone the tab strip scrolls; without its own
+            background the tabs slide THROUGH this cluster and "Purchases"
+            collides with "Sign out". */}
+        <div className="relative z-10 bg-panel pl-3 ml-auto flex items-center gap-3 sm:gap-4 shrink-0 font-mono text-[11px] leading-none">
           <p className="hidden lg:flex items-center gap-2">
             <span className="text-ink-50 font-semibold tabular-nums">{clock ?? "—:—"}</span>
             <span className="text-border-hi" aria-hidden="true">·</span>

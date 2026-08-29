@@ -10,7 +10,13 @@ import { clientKey } from "./restaurant-auth";
 export type AuditAction =
   | "auth.sign_in"
   | "shift.closed"
-  | "shift.reopened";
+  | "shift.reopened"
+  | "count.submitted"
+  | "count.approved"
+  | "count.rejected"
+  | "purchase.received"
+  | "purchase.reconciled"
+  | "waste.logged";
 
 export async function audit(opts: {
   restaurantId: string;
