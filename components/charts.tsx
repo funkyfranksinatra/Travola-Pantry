@@ -338,8 +338,15 @@ export function AreaChart({
 // ── Columns ───────────────────────────────────────────────────────────
 
 /** Vertical bars for a small ordered set — days of the week, party sizes. */
-export function Columns({ points, format, height = 170, highlight, tone = VIZ[0] }: {
+export function Columns({ points, format, height = 170, highlight, tone = VIZ[0], valueLabel = "Covers", showValues = false }: {
   points: Point[]; format: (value: number) => string; height?: number; highlight?: string; tone?: string;
+  /** What the tooltip calls the value — "Covers" for Home parity, but a
+   *  reused chart must not call food cost a cover count. */
+  valueLabel?: string;
+  /** Direct labels above each bar. For a handful of bars whose exact
+   *  values matter (a food-cost %, not a busy-hours histogram), making
+   *  the reader hover for every number is making them work. */
+  showValues?: boolean;
 }) {
   const [hover, setHover] = useState<Hover>(null);
   const values = points.map((p) => p.value ?? 0);
@@ -362,16 +369,19 @@ export function Columns({ points, format, height = 170, highlight, tone = VIZ[0]
                   y: height * 0.35,
                   title: point.label,
                   rows: [
-                    { label: "Covers", value: format(value) },
+                    { label: valueLabel, value: format(value) },
                     ...(point.sample != null ? [{ label: "Parties", value: point.sample.toLocaleString("en-US") }] : []),
                   ],
                 })
               }
             >
+              {showValues ? (
+                <span className="mb-1 text-center text-[11px] text-ink-200 tabular-nums">{format(value)}</span>
+              ) : null}
               <span
                 className="w-full rounded-t transition-[height,opacity]"
                 style={{
-                  height: `${Math.max(value > 0 ? 3 : 0, (value / max) * 100)}%`,
+                  height: `${Math.max(value > 0 ? 3 : 0, (value / max) * (showValues ? 88 : 100))}%`,
                   background: isHigh ? tone : "color-mix(in srgb, " + tone + " 55%, transparent)",
                   borderRadius: "4px 4px 0 0",
                 }}

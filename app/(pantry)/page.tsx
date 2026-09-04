@@ -14,8 +14,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card, Chip, Empty, PageHeader, SectionHeading } from "@/components/ui";
-import { StatTile } from "@/components/charts";
-import { money, integer, shortDate } from "@/lib/format";
+import { Columns, StatTile } from "@/components/charts";
+import { money, integer, percent, shortDate } from "@/lib/format";
 import { PERIOD_LABELS, dateKey, likelyServiceDate, type Period } from "@/lib/shift";
 
 type Entry = {
@@ -25,6 +25,10 @@ type Entry = {
   covers: number | null;
   notes: string | null;
   totals: { averageCheckCents: number | null; bevMixPct: number | null };
+};
+type TrendPoint = {
+  key: string; from: string; to: string;
+  usageValueCents: number; salesCents: number; cogsPct: number | null;
 };
 
 /** The last 14 service dates, newest first. Deliberately calendar days
@@ -45,6 +49,7 @@ function recentDays(count = 14) {
 
 export default function TodayPage() {
   const [entries, setEntries] = useState<Entry[] | null>(null);
+  const [trend, setTrend] = useState<TrendPoint[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,6 +61,11 @@ export default function TodayPage() {
       })
       .then((body) => setEntries(body.entries ?? []))
       .catch((err) => setError(err.message));
+    // The trend is additive — the page must render whole without it.
+    fetch("/api/trend")
+      .then((response) => response.json())
+      .then((body) => setTrend(body.points ?? []))
+      .catch(() => setTrend([]));
   }, []);
 
   if (error) return <Empty>{error}</Empty>;
@@ -138,6 +148,35 @@ export default function TodayPage() {
           </p>
         </Card>
       )}
+
+      {/* ── Food cost, window to window ── the weekly-P&L habit at
+          Pantry's scale: one bar per counted window. The trend lives
+          here on Today; the full hunting list lives on Recipes. */}
+      {trend && trend.filter((point) => point.cogsPct != null).length >= 2 ? (
+        <Card className="p-5">
+          <SectionHeading
+            title="Food cost, window to window"
+            note="Each bar is one counted window: opening valuation + deliveries − closing valuation, as a % of that window's net sales. Count weekly and this becomes your weekly food cost."
+            action={<Link href="/recipes" className="text-sm text-ai hover:underline shrink-0">Full report →</Link>}
+          />
+          <Columns
+            height={120}
+            valueLabel="Food cost"
+            showValues
+            points={trend
+              .filter((point) => point.cogsPct != null)
+              .map((point) => ({
+                key: point.key,
+                label: shortDate(String(point.to).slice(0, 10)),
+                value: point.cogsPct,
+              }))}
+            format={(value) => percent(value)}
+          />
+          {trend.some((point) => point.cogsPct == null) ? (
+            <p className="mt-2 text-xs text-ink-400">Windows with no recorded sales are left out — a 0% food cost would be a lie.</p>
+          ) : null}
+        </Card>
+      ) : null}
 
       {/* ── What is built now ── */}
       <Card className="p-5">

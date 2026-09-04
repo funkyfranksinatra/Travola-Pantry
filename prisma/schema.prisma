@@ -113,6 +113,7 @@ model Restaurant {
   purchases        Purchase[]
   wasteEvents      WasteEvent[]
   categoryCaps     InventoryCategoryCap[]
+  reportSubscription ReportSubscription?
 }
 
 // ─── CRM ─────────────────────────────────────────────────────────────
@@ -1372,4 +1373,23 @@ model InventoryCategoryCap {
   updatedAt DateTime @updatedAt
 
   @@unique([restaurantId, category])
+}
+
+/// The weekly digest: the variance window's headline numbers in a
+/// manager's inbox every Monday morning, so nobody has to remember to
+/// run the report. One row per restaurant; the cron route walks the
+/// enabled rows. Sending needs an email provider key on the deployment
+/// — absent, the row waits and Settings says exactly what to set.
+model ReportSubscription {
+  id           String     @id @default(cuid())
+  restaurantId String     @unique
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  email   String
+  enabled Boolean @default(true)
+  /// Idempotency: a cron retry inside the same week sends nothing twice.
+  lastSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

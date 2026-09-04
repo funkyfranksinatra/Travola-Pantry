@@ -10,9 +10,16 @@
 // until someone says they have looked.
 import { useCallback, useEffect, useState } from "react";
 import { Button, Card, Chip, Field, PageHeader, SectionHeading, inputClass } from "@/components/ui";
-import { money, dateLabel } from "@/lib/format";
+import { Delta } from "@/components/charts";
+import { money, dateLabel, shortDate } from "@/lib/format";
 
 type Item = { id: string; name: string; purchaseUnit: string; lastCostCents: number };
+type PriceRow = {
+  itemId: string; name: string; category: string; purchaseUnit: string;
+  vendorName: string; paidCents: number; paidAt: string;
+  previousCents: number | null; movePct: number | null; capPct: number;
+  overCap: boolean; contractPriceCents: number | null; overContract: boolean;
+};
 type Line = { id: string; itemId: string; itemName: string; purchaseUnit: string; qtyOrdered: number; qtyReceived: number | null; unitCostCents: number };
 type Problem =
   | { kind: "short"; itemName: string; ordered: number; received: number }
@@ -49,14 +56,19 @@ export default function PurchasesPage() {
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [invoiceTotal, setInvoiceTotal] = useState("");
 
+  const [prices, setPrices] = useState<PriceRow[] | null>(null);
+
   const load = useCallback(async () => {
-    const [purchasesRes, itemsRes] = await Promise.all([fetch("/api/purchases"), fetch("/api/items")]);
-    const [purchasesBody, itemsBody] = await Promise.all([purchasesRes.json(), itemsRes.json()]);
+    const [purchasesRes, itemsRes, pricesRes] = await Promise.all([
+      fetch("/api/purchases"), fetch("/api/items"), fetch("/api/prices"),
+    ]);
+    const [purchasesBody, itemsBody, pricesBody] = await Promise.all([purchasesRes.json(), itemsRes.json(), pricesRes.json()]);
     if (!purchasesRes.ok) { setError(purchasesBody.error ?? "Could not load."); return; }
     setPurchases(purchasesBody.purchases);
     setItems((itemsBody.items ?? []).map((item: Item & Record<string, unknown>) => ({
       id: item.id, name: item.name, purchaseUnit: item.purchaseUnit, lastCostCents: item.lastCostCents,
     })));
+    setPrices(pricesBody.rows ?? []);
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -262,6 +274,49 @@ export default function PurchasesPage() {
           </div>
         )}
       </Card>
+
+      {/* ── Price watch ── the price verification report, one location's
+          worth: what we paid vs last time, who sold it, and whether the
+          move broke the category cap or the contract. Trouble sorts to
+          the top — the first row is the first phone call. */}
+      {prices && prices.length ? (
+        <Card className="p-0 overflow-hidden">
+          <div className="px-5 pt-5 pb-3">
+            <SectionHeading title="Price watch"
+              note="Every item's latest received price against the previous one. A red move past its category cap is worth a look; over contract is worth a credit-memo call. Caps live under Settings." />
+          </div>
+          <div className="overflow-x-auto">
+            <table className="data-table w-full">
+              <thead><tr><th>Item</th><th>Vendor</th><th className="text-right">Paid</th><th className="text-right">Previous</th><th className="text-right">Move</th><th></th></tr></thead>
+              <tbody>
+                {prices.slice(0, 12).map((row) => (
+                  <tr key={row.itemId}>
+                    <td className="text-ink-50">
+                      {row.name}
+                      {row.category !== "other" ? <span className="ml-2 text-xs text-ink-400">{row.category}</span> : null}
+                    </td>
+                    <td className="text-ink-400">{row.vendorName}</td>
+                    <td className="text-right tabular-nums">
+                      {money(row.paidCents)}<span className="text-xs text-ink-400">/{row.purchaseUnit}</span>
+                      <span className="block text-[11px] text-ink-400">{shortDate(row.paidAt.slice(0, 10))}</span>
+                    </td>
+                    <td className="text-right tabular-nums">{row.previousCents != null ? money(row.previousCents) : "—"}</td>
+                    <td className="text-right">
+                      {row.movePct != null ? <Delta pct={row.movePct} goodWhen="down" basis={`Cap for ${row.category}: ${row.capPct}%`} /> : <span className="text-ink-400 text-sm">—</span>}
+                    </td>
+                    <td className="text-right">
+                      <span className="inline-flex gap-1.5">
+                        {row.overContract ? <Chip tone="bad">over contract</Chip> : null}
+                        {row.overCap && !row.overContract ? <Chip tone="warn">past cap</Chip> : null}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      ) : null}
     </div>
   );
 }

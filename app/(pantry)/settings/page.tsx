@@ -18,6 +18,54 @@ export default function SettingsPage() {
   const [capsError, setCapsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // ── Weekly report subscription ──
+  const [subEmail, setSubEmail] = useState("");
+  const [subEnabled, setSubEnabled] = useState(true);
+  const [subSaved, setSubSaved] = useState<{ email: string; enabled: boolean; lastSentAt: string | null } | null>(null);
+  const [providerConfigured, setProviderConfigured] = useState<boolean | null>(null);
+  const [setupHint, setSetupHint] = useState<string | null>(null);
+  const [subNote, setSubNote] = useState<string | null>(null);
+  const [subError, setSubError] = useState<string | null>(null);
+  const [subBusy, setSubBusy] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/subscription")
+      .then((response) => response.json())
+      .then((body) => {
+        setProviderConfigured(Boolean(body.providerConfigured));
+        setSetupHint(body.setupHint ?? null);
+        if (body.subscription) {
+          setSubSaved(body.subscription);
+          setSubEmail(body.subscription.email);
+          setSubEnabled(body.subscription.enabled);
+        }
+      })
+      .catch(() => setSubError("Could not load the subscription."));
+  }, []);
+
+  async function subPost(payload: Record<string, unknown>) {
+    setSubBusy(true); setSubError(null); setSubNote(null);
+    try {
+      const response = await fetch("/api/subscription", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? "That did not work.");
+      return body;
+    } catch (err) { setSubError((err as Error).message); return null; }
+    finally { setSubBusy(false); }
+  }
+
+  async function saveSubscription() {
+    const body = await subPost({ action: "set", email: subEmail, enabled: subEnabled });
+    if (body) { setSubSaved({ email: subEmail.trim(), enabled: subEnabled, lastSentAt: subSaved?.lastSentAt ?? null }); setSubNote("Saved."); }
+  }
+
+  async function sendTest() {
+    const body = await subPost({ action: "test" });
+    if (body) setSubNote(`Sent to ${body.sentTo}. If it is not there in a minute, check spam — then the provider's dashboard.`);
+  }
+
   useEffect(() => {
     fetch("/api/caps")
       .then((response) => response.json())
@@ -99,6 +147,47 @@ export default function SettingsPage() {
       </Card>
 
       <Card className="p-5">
+        <SectionHeading title="Weekly report email"
+          note="The variance window's headline numbers — food cost, % of sales, the worst variances — in an inbox every Monday morning. Same arithmetic as the Recipes tab; nobody has to remember to run anything." />
+        {subError ? <p className="mb-3 text-sm text-state-seated">{subError}</p> : null}
+        {subNote && !subError ? <p className="mb-3 text-sm text-state-avail">{subNote}</p> : null}
+        <div className="flex flex-wrap items-end gap-3 max-w-xl">
+          <label className="block flex-1 min-w-[220px]">
+            <span className="label block mb-1.5">Send it to</span>
+            <input
+              className="w-full rounded-lg bg-panel border border-border px-3 py-2 text-sm text-ink-50 placeholder:text-ink-400/60 focus:border-ai outline-none"
+              type="email" placeholder="manager@restaurant.com"
+              value={subEmail} onChange={(e) => setSubEmail(e.target.value)}
+            />
+          </label>
+          <label className="flex items-center gap-2 pb-2.5 text-sm text-ink-200">
+            <input type="checkbox" checked={subEnabled} onChange={(e) => setSubEnabled(e.target.checked)} className="accent-[#818cf8]" />
+            On
+          </label>
+          <button type="button" disabled={subBusy || !subEmail.trim()} onClick={saveSubscription}
+            className="rounded-lg bg-ai text-bg font-semibold px-4 py-2.5 text-sm hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
+            Save
+          </button>
+          {subSaved && providerConfigured ? (
+            <button type="button" disabled={subBusy} onClick={sendTest}
+              className="rounded-lg bg-panel-up text-ink-50 border border-border px-4 py-2.5 text-sm hover:bg-panel-up/70 disabled:opacity-40">
+              Send one now
+            </button>
+          ) : null}
+        </div>
+        {providerConfigured === false ? (
+          <p className="mt-3 rounded-lg bg-panel-up/50 border border-border px-3.5 py-2.5 text-xs text-ink-200 leading-relaxed max-w-xl">
+            The address saves now, but no emails go out until the deployment has an email provider:
+            {" "}{setupHint ?? "set RESEND_API_KEY on the Vercel project."} The Monday schedule itself is
+            already wired (it also needs CRON_SECRET set — any long random string).
+          </p>
+        ) : null}
+        {subSaved?.lastSentAt ? (
+          <p className="mt-3 text-xs text-ink-400">Last sent {new Date(subSaved.lastSentAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}.</p>
+        ) : null}
+      </Card>
+
+      <Card className="p-5">
         <SectionHeading title="The staff counting app" note="" />
         <p className="text-sm text-ink-200 max-w-2xl leading-relaxed">
           Staff can count from the Count tab on any phone, or from the Travola Pantry app for
@@ -115,7 +204,6 @@ export default function SettingsPage() {
             ["App-store listings", "The counting app builds today from the travola-pantry-mobile repo (Android Studio / Xcode). Play Store and App Store submission is a release step, not a build step."],
             ["Live POS connectors", "Theoretical usage already reads item-level sales from the shared database. Toast and Square integrations will feed the same tables; the variance engine does not change."],
             ["Vendor EDI feeds", "Invoices arrive by hand today. Electronic feeds from broadliners need vendor integration agreements — the three-way match is the manual stand-in until then."],
-            ["Emailed report subscriptions", "The variance report in a manager's inbox every Monday at 8am. Needs an email provider account; the report itself is ready."],
             ["General-ledger posting", "Approved counts freeze a valuation. Posting that to a GL needs an accounting integration (QuickBooks et al) that does not exist yet — the valuation is ready for it."],
             ["Invoice scanning", "Receiving is typed today. The menu importer's photo-reading machinery will point at invoices later."],
           ].map(([title, detail]) => (

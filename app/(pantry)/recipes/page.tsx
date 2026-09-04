@@ -25,7 +25,7 @@ type VarianceRow = {
   itemId: string; itemName: string; roomName: string; countUnit: string; category: string;
   actualUsageCount: number | null; theoreticalUsageCount: number | null;
   wasteCount: number; wasteValueCents: number; varianceCount: number | null; varianceValueCents: number | null;
-  actualValueCents: number | null; sharePct: number | null;
+  actualValueCents: number | null; theoreticalValueCents: number | null; sharePct: number | null;
   hasRecipeUsage: boolean;
 };
 type VarianceData = {
@@ -59,6 +59,10 @@ export default function RecipesPage() {
   // fetched. Cached per item so re-opening a row is instant.
   const [drillOpen, setDrillOpen] = useState<string | null>(null);
   const [drills, setDrills] = useState<Record<string, Drill | "loading">>({});
+  // The R365 habit worth keeping: the same report in count units (how
+  // a chef thinks) or in dollars (how an owner thinks). One dataset,
+  // two renderings — never two computations.
+  const [view, setView] = useState<"units" | "dollars">("units");
 
   const load = useCallback(async (open?: string, close?: string) => {
     const query = open && close ? `?open=${open}&close=${close}` : "";
@@ -185,7 +189,7 @@ export default function RecipesPage() {
           <StatTile
             label="Food cost — this window"
             value={money(totals.actualUsageValueCents)}
-            hint="Opening + deliveries − closing, priced at cost."
+            hint="Opening valuation + deliveries at receipt price − closing valuation. Frozen numbers — today's prices never rewrite it."
           />
           <StatTile
             label="Food cost % of sales"
@@ -211,7 +215,24 @@ export default function RecipesPage() {
       {/* ── AvT ── */}
       <Card className="p-5">
         <SectionHeading title="Actual vs theoretical"
-          note="Actual usage from the counts and deliveries; theoretical from recipes × items sold. The gap is over-portioning, waste, breakage or theft — visible now, not in a month-end P&L. Click any row to open its full equation." />
+          note="Actual usage from the counts and deliveries; theoretical from recipes × items sold. The gap is over-portioning, waste, breakage or theft — visible now, not in a month-end P&L. Click any row to open its full equation."
+          action={
+            variance?.ready ? (
+              <div className="flex rounded-lg border border-border overflow-hidden shrink-0" role="group" aria-label="Show the report in">
+                {(["units", "dollars"] as const).map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    aria-pressed={view === option}
+                    onClick={() => setView(option)}
+                    className={`px-3 py-1.5 text-xs font-semibold ${view === option ? "bg-ai text-bg" : "bg-panel-up/40 text-ink-400 hover:text-ink-50"}`}
+                  >
+                    {option === "units" ? "Units" : "Dollars"}
+                  </button>
+                ))}
+              </div>
+            ) : undefined
+          } />
         {!variance?.ready ? (
           <Empty>{variance?.reason ?? "Loading…"}</Empty>
         ) : (
@@ -225,13 +246,13 @@ export default function RecipesPage() {
             ) : null}
             <div className="overflow-x-auto">
               <table className="data-table w-full">
-                <thead><tr><th>Item</th><th>Room</th><th className="text-right">Actual used</th><th className="text-right">Theoretical</th><th className="text-right">Waste logged</th><th className="text-right">Variance</th><th className="text-right">$ impact</th><th className="text-right" title="Share of the window's total usage dollars — the cost breakout.">% of usage</th></tr></thead>
+                <thead><tr><th>Item</th><th>Room</th><th className="text-right">Actual used</th><th className="text-right">Theoretical</th><th className="text-right">Waste logged</th><th className="text-right">Variance</th>{view === "units" ? <th className="text-right">$ impact</th> : null}<th className="text-right" title="Share of the window's total usage dollars — the cost breakout.">% of usage</th></tr></thead>
                 <tbody>
                   {rows.slice(0, 25).map((row) => {
                     const open = drillOpen === row.itemId;
                     const drill = drills[row.itemId];
                     return (
-                      <RowWithDrill key={row.itemId} row={row} open={open} drill={drill} onToggle={() => toggleDrill(row.itemId)} />
+                      <RowWithDrill key={row.itemId} row={row} view={view} open={open} drill={drill} onToggle={() => toggleDrill(row.itemId)} />
                     );
                   })}
                 </tbody>
@@ -248,9 +269,10 @@ export default function RecipesPage() {
  *  that bookend it, every delivery, the waste log, and dish-by-dish
  *  sales. R365 calls this drill-through; here nobody even leaves the
  *  table. */
-function RowWithDrill({ row, open, drill, onToggle }: {
-  row: VarianceRow; open: boolean; drill: Drill | "loading" | undefined; onToggle: () => void;
+function RowWithDrill({ row, view, open, drill, onToggle }: {
+  row: VarianceRow; view: "units" | "dollars"; open: boolean; drill: Drill | "loading" | undefined; onToggle: () => void;
 }) {
+  const dollars = view === "dollars";
   return (
     <>
       <tr onClick={onToggle} className="cursor-pointer hover:bg-panel-up/40" aria-expanded={open}>
@@ -260,17 +282,29 @@ function RowWithDrill({ row, open, drill, onToggle }: {
           {row.category !== "other" ? <span className="ml-2 text-xs text-ink-400">{row.category}</span> : null}
         </td>
         <td className="text-ink-400">{row.roomName}</td>
-        <td className="text-right tabular-nums">{row.actualUsageCount != null ? `${row.actualUsageCount.toFixed(1)} ${row.countUnit}` : "—"}</td>
-        <td className="text-right tabular-nums">{row.theoreticalUsageCount != null ? `${row.theoreticalUsageCount.toFixed(1)} ${row.countUnit}` : "—"}</td>
-        <td className="text-right tabular-nums">{row.wasteCount ? `${row.wasteCount.toFixed(1)} · ${money(row.wasteValueCents)}` : "—"}</td>
+        <td className="text-right tabular-nums">
+          {dollars
+            ? (row.actualValueCents != null ? money(row.actualValueCents) : "—")
+            : (row.actualUsageCount != null ? `${row.actualUsageCount.toFixed(1)} ${row.countUnit}` : "—")}
+        </td>
+        <td className="text-right tabular-nums">
+          {dollars
+            ? (row.theoreticalValueCents != null ? money(row.theoreticalValueCents) : "—")
+            : (row.theoreticalUsageCount != null ? `${row.theoreticalUsageCount.toFixed(1)} ${row.countUnit}` : "—")}
+        </td>
+        <td className="text-right tabular-nums">
+          {!row.wasteCount ? "—" : dollars ? money(row.wasteValueCents) : `${row.wasteCount.toFixed(1)} · ${money(row.wasteValueCents)}`}
+        </td>
         <td className="text-right tabular-nums">
           {row.varianceCount == null ? "—" : (
             <span className={Math.abs(row.varianceValueCents ?? 0) >= 500 ? "text-state-seated font-semibold" : ""}>
-              {row.varianceCount > 0 ? "+" : ""}{row.varianceCount.toFixed(1)} {row.countUnit}
+              {dollars
+                ? money(row.varianceValueCents ?? 0)
+                : `${row.varianceCount > 0 ? "+" : ""}${row.varianceCount.toFixed(1)} ${row.countUnit}`}
             </span>
           )}
         </td>
-        <td className="text-right tabular-nums">{row.varianceValueCents != null ? money(row.varianceValueCents) : "—"}</td>
+        {!dollars ? <td className="text-right tabular-nums">{row.varianceValueCents != null ? money(row.varianceValueCents) : "—"}</td> : null}
         <td className="text-right tabular-nums">{row.sharePct != null ? percent(row.sharePct) : "—"}</td>
       </tr>
       {open ? (

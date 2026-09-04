@@ -28,6 +28,10 @@
 | Suggested ordering | ✅ Order tab: expected usage across the horizon (consumption + buffer days, trailing 28-day sales average) minus theoretical on-hand, rounded UP to whole purchase units. Items the maths cannot support print their REASON, never a zero. |
 | Shopping list → multi-vendor POs | ✅ The order sheet groups by each item's preferred vendor and creates one purchase order per vendor in one click. |
 | Duplicate item merge | ✅ In the room editor: history (counts, recipes, orders, waste) repoints at the survivor, clashing rows are summed, the twin retires. Refused across different units — "3 cases" and "3 lb" cannot be summed. |
+| Report subscriptions | ✅ Weekly digest — the window's headline numbers and worst variances — emailed Mondays by a Vercel cron. Needs RESEND_API_KEY + CRON_SECRET on the deployment; until then Settings saves the address and says exactly what to set. The digest renders from the SAME variance engine as the Recipes tab (lib/variance-engine.ts), extracted so the screen and the inbox can never disagree. |
+| Units ↔ dollars toggle | ✅ The AvT table renders in count units or dollars — same dataset, two renderings, never two computations. |
+| Price verification (single-location) | ✅ "Price watch" on Purchases: each item's latest received price vs the previous distinct one, vendor, % move against its category cap, contract breaches sorted first. |
+| Food-cost trend | ✅ "Food cost, window to window" on Today: one bar per counted window, from the LEDGER equation — frozen opening valuation + deliveries at receipt price − frozen closing valuation, over that window's net sales. The variance report's headline uses the same equation, so the two screens agree by construction. |
 
 ## Shelved for later architecting — and the seam left for each
 
@@ -52,11 +56,6 @@ it is a later phase.
 per-vendor integration agreements Travola cannot sign pre-revenue; the
 three-way match is the manual stand-in, and a feed would simply create
 the same Purchase rows receiving already consumes.
-
-**Emailed report subscriptions.** The R365 habit worth copying — the
-variance report in an inbox every Monday at 8am — needs an email
-provider account the project does not have. The report and its window
-maths are ready; the subscription is a cron + template when it comes.
 
 **Invoice scanning / OCR receiving.** Receiving is typed today. The menu
 importer's photo-parsing machinery is the obvious thing to point at
@@ -89,6 +88,11 @@ corrections, which is exactly what a parser would emit.
 - **Blocked suggestions print their reason** ("not in both bookend
   counts", "no sales in the counted window") at the bottom of the order
   sheet. A silent zero reads as "don't order", which is exactly wrong.
+- **The headline food cost is frozen; the row dollars are current.**
+  The window's food cost comes from frozen count valuations and actual
+  receipt prices — history a later price change can never rewrite. The
+  per-row dollar values are priced at TODAY's cost on purpose: they are
+  a hunting list for what to fix now, not a ledger.
 - **Merging across different units is refused.** Quantities are meaningless
   without their units; the merge sums clashing rows only when the units
   agree.
