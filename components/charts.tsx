@@ -338,7 +338,7 @@ export function AreaChart({
 // ── Columns ───────────────────────────────────────────────────────────
 
 /** Vertical bars for a small ordered set — days of the week, party sizes. */
-export function Columns({ points, format, height = 170, highlight, tone = VIZ[0], valueLabel = "Covers", showValues = false }: {
+export function Columns({ points, format, height = 170, highlight, tone = VIZ[0], valueLabel = "Covers", showValues = false, target }: {
   points: Point[]; format: (value: number) => string; height?: number; highlight?: string; tone?: string;
   /** What the tooltip calls the value — "Covers" for Home parity, but a
    *  reused chart must not call food cost a cover count. */
@@ -347,13 +347,30 @@ export function Columns({ points, format, height = 170, highlight, tone = VIZ[0]
    *  values matter (a food-cost %, not a busy-hours histogram), making
    *  the reader hover for every number is making them work. */
   showValues?: boolean;
+  /** A dashed reference line — a target, a budget, a par. It joins the
+   *  scale (a target above every bar must still be on the chart) and is
+   *  always labelled: an unlabelled line is chart lint. */
+  target?: { value: number; label: string };
 }) {
   const [hover, setHover] = useState<Hover>(null);
   const values = points.map((p) => p.value ?? 0);
-  const max = Math.max(1, ...values);
+  const max = Math.max(1, ...values, target?.value ?? 0);
+  const scale = showValues ? 88 : 100;
   if (!points.length) return <Empty>Nothing to chart in this window.</Empty>;
   return (
     <figure className="relative m-0">
+      {/* The line anchors to the BARS box, not the figure — the label
+          row under the chart must not shift the target's position. */}
+      <div className="relative">
+      {target ? (
+        <div
+          className="pointer-events-none absolute left-0 right-0 z-10 border-t border-dashed"
+          style={{ bottom: `${(target.value / max) * scale}%`, borderColor: "color-mix(in srgb, var(--color-ink-400) 65%, transparent)" }}
+          aria-hidden="true"
+        >
+          <span className="absolute right-0 -top-4 text-[10px] text-ink-400 bg-panel px-1 rounded">{target.label}</span>
+        </div>
+      ) : null}
       <div className="flex items-end gap-1.5" style={{ height }} onMouseLeave={() => setHover(null)}>
         {points.map((point, index) => {
           const value = point.value ?? 0;
@@ -389,6 +406,7 @@ export function Columns({ points, format, height = 170, highlight, tone = VIZ[0]
             </button>
           );
         })}
+      </div>
       </div>
       <Tooltip hover={hover} />
       <div className="mt-2 flex gap-1.5">

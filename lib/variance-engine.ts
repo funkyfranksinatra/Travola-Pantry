@@ -37,6 +37,14 @@ export type VarianceReport =
         varianceValueCents: number; actualUsageValueCents: number;
         wasteValueCents: number; salesCents: number; cogsPct: number | null;
       };
+      /// Sales rung up on dishes with NO recipe. Their ingredients
+      /// deplete shelves invisibly, so theoretical usage is understated
+      /// by roughly this share — and every variance above it is partly
+      /// this gap wearing a scarier name. R365's Dan: the #1 cause of
+      /// bad theoreticals is an unmapped POS button.
+      unmapped: { salesCents: number; checkSalesCents: number; pct: number | null };
+      /// The food-cost % this restaurant manages to, when one is set.
+      targetPct: number | null;
       rows: VarianceReportRow[];
     };
 
@@ -133,6 +141,24 @@ export async function varianceReport(
   const hasSales = await prisma.check.count({
     where: { restaurantId, status: "closed", openedAt: { gte: fromAt, lte: toAt } },
   });
+
+  // Sales through recipe-less dishes. Same window, same closed-check
+  // scope as the theoretical query above — the two must count the same
+  // tickets or the honesty note lies about the honesty gap.
+  const [unmappedRow] = await prisma.$queryRawUnsafe<Array<{ total: unknown; unmapped: unknown }>>(
+    `SELECT COALESCE(SUM(ci."priceCents" * ci.quantity), 0) AS total,
+            COALESCE(SUM(ci."priceCents" * ci.quantity) FILTER (WHERE r.id IS NULL), 0) AS unmapped
+       FROM "CheckItem" ci
+       JOIN "Check" ch ON ch.id = ci."checkId"
+       LEFT JOIN "Recipe" r ON r."menuItemId" = ci."menuItemId" AND r."restaurantId" = $1
+      WHERE ch."restaurantId" = $1 AND ch.status = 'closed'
+        AND ch."openedAt" >= $2 AND ch."openedAt" <= $3`,
+    restaurantId, fromAt, toAt,
+  );
+  const checkSalesCents = Number(unmappedRow?.total ?? 0);
+  const unmappedSalesCents = Number(unmappedRow?.unmapped ?? 0);
+
+  const pantrySettings = await prisma.pantrySettings.findUnique({ where: { restaurantId } });
 
   // Which items appear in ANY recipe. For an item no recipe references
   // (fryer oil, cleaning supplies), theoretical usage is UNKNOWABLE —
@@ -239,6 +265,12 @@ export async function varianceReport(
       // Null when the window has no sales — a 0% food cost is a lie.
       cogsPct: salesCents > 0 ? (actualUsageValueCents / salesCents) * 100 : null,
     },
+    unmapped: {
+      salesCents: unmappedSalesCents,
+      checkSalesCents,
+      pct: checkSalesCents > 0 ? (unmappedSalesCents / checkSalesCents) * 100 : null,
+    },
+    targetPct: pantrySettings?.foodCostTargetPct == null ? null : Number(pantrySettings.foodCostTargetPct),
     rows: sharedRows,
   };
 }

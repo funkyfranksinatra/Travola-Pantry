@@ -114,6 +114,7 @@ model Restaurant {
   wasteEvents      WasteEvent[]
   categoryCaps     InventoryCategoryCap[]
   reportSubscription ReportSubscription?
+  pantrySettings     PantrySettings?
 }
 
 // ─── CRM ─────────────────────────────────────────────────────────────
@@ -1389,6 +1390,24 @@ model ReportSubscription {
   enabled Boolean @default(true)
   /// Idempotency: a cron retry inside the same week sends nothing twice.
   lastSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Pantry-only knobs, one row per restaurant. Separate from the shared
+/// RestaurantSettings on purpose: that row belongs to the floor app,
+/// and two products writing one settings row is how the row ends up
+/// wrong. Today it holds one number; it is the place pantry knobs grow.
+model PantrySettings {
+  id           String     @id @default(cuid())
+  restaurantId String     @unique
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  /// The food-cost % this restaurant manages to. Null = no target set.
+  /// One number, not a budget model — the two-hour version of budget
+  /// tracking that turns "33.1%" into "33.1% against your 30".
+  foodCostTargetPct Decimal? @db.Decimal(5, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

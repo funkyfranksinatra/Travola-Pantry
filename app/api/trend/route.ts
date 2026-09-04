@@ -25,8 +25,20 @@ export async function GET(request: Request) {
       take: 13, // 12 windows — a quarter of weekly counting
       select: { id: true, approvedAt: true, totalValueCents: true },
     });
+
+    // Riders for the Today page, present whatever the point count: the
+    // target draws the line on the chart, and the last approved count
+    // powers the cadence nudge — which matters MOST before there are
+    // enough counts to chart anything.
+    const settings = await prisma.pantrySettings.findUnique({ where: { restaurantId } });
+    const targetPct = settings?.foodCostTargetPct == null ? null : Number(settings.foodCostTargetPct);
+    const lastApprovedAt = counts.length ? counts[counts.length - 1].approvedAt : null;
+
     if (counts.length < 2) {
-      return Response.json({ points: [], reason: "Two approved counts make the first point; each count after that adds one." });
+      return Response.json({
+        points: [], targetPct, lastApprovedAt,
+        reason: "Two approved counts make the first point; each count after that adds one.",
+      });
     }
 
     // All received lines across the whole span, bucketed per window in
@@ -66,6 +78,6 @@ export async function GET(request: Request) {
       });
     }
 
-    return Response.json({ points });
+    return Response.json({ points, targetPct, lastApprovedAt });
   });
 }

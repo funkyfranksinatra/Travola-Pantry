@@ -17,7 +17,27 @@ import { Button, Card, Chip, Empty, Field, PageHeader, SectionHeading, inputClas
 import { money, dateLabel } from "@/lib/format";
 
 type Room = { id: string; name: string; kind: string; itemCount: number; sortOrder: number };
-type Item = { id: string; roomId: string; name: string; countUnit: string; isKeyItem: boolean; sortOrder: number };
+type Item = {
+  id: string; roomId: string; name: string; countUnit: string; isKeyItem: boolean; sortOrder: number;
+  purchaseUnit: string; countPerPurchase: number;
+};
+
+/** Real shelves hold "2 unopened cases and 3 loose lb". Items whose
+ *  purchase unit differs from their count unit get two boxes, and the
+ *  arithmetic happens HERE instead of in the counter's head — which is
+ *  where 40-for-4 slips are born. */
+const hasCaseEntry = (item: Item) => item.countPerPurchase > 1 && item.purchaseUnit !== item.countUnit;
+
+type Entry = { cases: string; loose: string };
+const entryTotal = (item: Item, entry: Entry | undefined): number | null => {
+  const cases = (entry?.cases ?? "").trim();
+  const loose = (entry?.loose ?? "").trim();
+  if (cases === "" && loose === "") return null;
+  const caseQty = cases === "" ? 0 : Number(cases);
+  const looseQty = loose === "" ? 0 : Number(loose);
+  if (!Number.isFinite(caseQty) || !Number.isFinite(looseQty) || caseQty < 0 || looseQty < 0) return null;
+  return caseQty * item.countPerPurchase + looseQty;
+};
 type CountSummary = {
   id: string; status: string; type: string; countedBy: string;
   submittedAt: string | null; approvedBy: string | null; approvedAt: string | null;
@@ -37,7 +57,7 @@ function CountInner() {
   const [countedBy, setCountedBy] = useState("");
   const [countType, setCountType] = useState<"full" | "key" | "spot">("spot");
   const [roomIndex, setRoomIndex] = useState(0);
-  const [entries, setEntries] = useState<Record<string, string>>({});
+  const [entries, setEntries] = useState<Record<string, Entry>>({});
   const [saved, setSaved] = useState<Record<string, "saved" | "saving" | "outlier">>({});
   const [outlierNote, setOutlierNote] = useState<Record<string, number>>({});
 
@@ -70,10 +90,9 @@ function CountInner() {
     finally { setBusy(false); }
   }
 
-  async function saveLine(item: Item, raw: string) {
-    if (raw.trim() === "") return;
-    const quantity = Number(raw);
-    if (!Number.isFinite(quantity) || quantity < 0) return;
+  async function saveLine(item: Item, entry: Entry | undefined) {
+    const quantity = entryTotal(item, entry);
+    if (quantity == null) return;
     setSaved((current) => ({ ...current, [item.id]: "saving" }));
     try {
       const body = await post({ action: "line", countId: activeId, itemId: item.id, quantity });
@@ -83,6 +102,13 @@ function CountInner() {
       setError((err as Error).message);
       setSaved((current) => { const next = { ...current }; delete next[item.id]; return next; });
     }
+  }
+
+  function setEntry(item: Item, patch: Partial<Entry>) {
+    setEntries((current) => {
+      const existing = current[item.id] ?? { cases: "", loose: "" };
+      return { ...current, [item.id]: { ...existing, ...patch } };
+    });
   }
 
   async function submit() {
@@ -138,32 +164,73 @@ function CountInner() {
         ) : null}
 
         <div className="flex flex-col gap-2.5">
-          {roomItems.map((item) => (
-            <Card key={item.id} className={`p-4 ${saved[item.id] === "outlier" ? "border-l-2 border-l-state-dining" : ""}`}>
-              <div className="flex items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <span className="block text-base text-ink-50 truncate">{item.name}</span>
-                  <span className="block text-[11px] text-ink-400 mt-0.5">{item.countUnit}</span>
+          {roomItems.map((item) => {
+            const entry = entries[item.id];
+            const dual = hasCaseEntry(item);
+            const total = entryTotal(item, entry);
+            const inputClassName =
+              "h-12 rounded-lg bg-panel border border-border text-right px-3 text-lg font-semibold text-ink-50 tabular-nums focus:border-ai outline-none placeholder:text-ink-400/40";
+            return (
+              <Card key={item.id} className={`p-4 ${saved[item.id] === "outlier" ? "border-l-2 border-l-state-dining" : ""}`}>
+                <div className="flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-base text-ink-50 truncate">{item.name}</span>
+                    <span className="block text-[11px] text-ink-400 mt-0.5">
+                      {dual ? `${item.countPerPurchase} ${item.countUnit} per ${item.purchaseUnit}` : item.countUnit}
+                    </span>
+                  </div>
+                  {dual ? (
+                    <>
+                      {/* Unopened + loose, added up by the software. */}
+                      <label className="flex flex-col items-end gap-1">
+                        <input
+                          inputMode="decimal"
+                          className={`${inputClassName} w-20`}
+                          placeholder="—"
+                          value={entry?.cases ?? ""}
+                          onChange={(event) => setEntry(item, { cases: event.target.value })}
+                          onBlur={() => saveLine(item, entries[item.id])}
+                        />
+                        <span className="text-[10px] text-ink-400">{item.purchaseUnit}s</span>
+                      </label>
+                      <span className="text-ink-400 pb-4" aria-hidden="true">+</span>
+                      <label className="flex flex-col items-end gap-1">
+                        <input
+                          inputMode="decimal"
+                          className={`${inputClassName} w-20`}
+                          placeholder="—"
+                          value={entry?.loose ?? ""}
+                          onChange={(event) => setEntry(item, { loose: event.target.value })}
+                          onBlur={() => saveLine(item, entries[item.id])}
+                        />
+                        <span className="text-[10px] text-ink-400">{item.countUnit} loose</span>
+                      </label>
+                    </>
+                  ) : (
+                    <input
+                      inputMode="decimal"
+                      className={`${inputClassName} w-28`}
+                      placeholder="—"
+                      value={entry?.loose ?? ""}
+                      onChange={(event) => setEntry(item, { loose: event.target.value })}
+                      onBlur={() => saveLine(item, entries[item.id])}
+                    />
+                  )}
+                  <span className="w-5 text-center text-sm shrink-0" aria-hidden="true">
+                    {saved[item.id] === "saving" ? "…" : saved[item.id] === "saved" ? "✓" : saved[item.id] === "outlier" ? "!" : ""}
+                  </span>
                 </div>
-                <input
-                  inputMode="decimal"
-                  className="w-28 h-12 rounded-lg bg-panel border border-border text-right px-3 text-lg font-semibold text-ink-50 tabular-nums focus:border-ai outline-none"
-                  placeholder="—"
-                  value={entries[item.id] ?? ""}
-                  onChange={(event) => setEntries((current) => ({ ...current, [item.id]: event.target.value }))}
-                  onBlur={(event) => saveLine(item, event.target.value)}
-                />
-                <span className="w-5 text-center text-sm shrink-0" aria-hidden="true">
-                  {saved[item.id] === "saving" ? "…" : saved[item.id] === "saved" ? "✓" : saved[item.id] === "outlier" ? "!" : ""}
-                </span>
-              </div>
-              {saved[item.id] === "outlier" ? (
-                <p className="mt-2 text-xs text-state-dining">
-                  Last approved count was {outlierNote[item.id]}. Saved anyway — check it is not a slip.
-                </p>
-              ) : null}
-            </Card>
-          ))}
+                {dual && total != null && (entry?.cases ?? "").trim() !== "" ? (
+                  <p className="mt-2 text-xs text-ink-200 tabular-nums text-right">= {total} {item.countUnit} on the shelf</p>
+                ) : null}
+                {saved[item.id] === "outlier" ? (
+                  <p className="mt-2 text-xs text-state-dining">
+                    Last approved count was {outlierNote[item.id]}. Saved anyway — check it is not a slip.
+                  </p>
+                ) : null}
+              </Card>
+            );
+          })}
         </div>
 
         <div className="sticky bottom-4 flex justify-between items-center gap-3">

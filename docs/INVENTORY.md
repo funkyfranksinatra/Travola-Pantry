@@ -32,6 +32,10 @@
 | Units ↔ dollars toggle | ✅ The AvT table renders in count units or dollars — same dataset, two renderings, never two computations. |
 | Price verification (single-location) | ✅ "Price watch" on Purchases: each item's latest received price vs the previous distinct one, vendor, % move against its category cap, contract breaches sorted first. |
 | Food-cost trend | ✅ "Food cost, window to window" on Today: one bar per counted window, from the LEDGER equation — frozen opening valuation + deliveries at receipt price − frozen closing valuation, over that window's net sales. The variance report's headline uses the same equation, so the two screens agree by construction. |
+| Case + loose counting | ✅ Items whose purchase unit differs from their count unit get two boxes — "2 cases + 3 lb loose = 53 lb" — on the web count flow AND the phone app. The arithmetic happens in the software, not the counter's head, which is where 40-for-4 slips are born. Older phone sessions with single-value entries normalise up. |
+| Unmapped-sales honesty note | ✅ When dishes with no recipe sold inside the window, the variance report and the digest say what share of POS sales they were — because their ingredients left the shelves invisibly, theoretical usage and every variance are understated by that share. R365's "#1 cause of bad theoreticals", surfaced instead of silently absorbed. |
+| Food-cost target | ✅ One % per restaurant (PantrySettings), set under Settings in ten seconds. Drawn as the dashed line on Today's trend, footnoted on the variance %-of-sales tile, and folded into the digest subject — "food cost 32.7% (target 30%)". A target, deliberately not a budget model. |
+| Count cadence nudge | ✅ Today shows "Last approved count: N days ago" past seven days (or "no approved counts yet"), and the digest says so too — weekly counting is the load-bearing habit, so its absence is named. |
 
 ## Shelved for later architecting — and the seam left for each
 

@@ -30,6 +30,7 @@ type TrendPoint = {
   key: string; from: string; to: string;
   usageValueCents: number; salesCents: number; cogsPct: number | null;
 };
+type TrendData = { points: TrendPoint[]; targetPct: number | null; lastApprovedAt: string | null };
 
 /** The last 14 service dates, newest first. Deliberately calendar days
  *  rather than "days the restaurant was open" — Pantry does not know the
@@ -49,7 +50,7 @@ function recentDays(count = 14) {
 
 export default function TodayPage() {
   const [entries, setEntries] = useState<Entry[] | null>(null);
-  const [trend, setTrend] = useState<TrendPoint[] | null>(null);
+  const [trend, setTrend] = useState<TrendData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -64,8 +65,8 @@ export default function TodayPage() {
     // The trend is additive — the page must render whole without it.
     fetch("/api/trend")
       .then((response) => response.json())
-      .then((body) => setTrend(body.points ?? []))
-      .catch(() => setTrend([]));
+      .then((body) => setTrend({ points: body.points ?? [], targetPct: body.targetPct ?? null, lastApprovedAt: body.lastApprovedAt ?? null }))
+      .catch(() => setTrend({ points: [], targetPct: null, lastApprovedAt: null }));
   }, []);
 
   if (error) return <Empty>{error}</Empty>;
@@ -149,21 +150,41 @@ export default function TodayPage() {
         </Card>
       )}
 
+      {/* ── Count cadence ── the whole inventory system leans on
+          regular approved counts, so a stale one is Today's business,
+          right beside the close-out nag it resembles. */}
+      {trend && (!trend.lastApprovedAt || Date.now() - new Date(trend.lastApprovedAt).getTime() >= 7 * 86_400_000) ? (
+        <Card className="p-5 border-l-2 border-l-state-dining">
+          <SectionHeading
+            title={trend.lastApprovedAt
+              ? `Last approved count: ${Math.floor((Date.now() - new Date(trend.lastApprovedAt).getTime()) / 86_400_000)} days ago`
+              : "No approved counts yet"}
+            note={trend.lastApprovedAt
+              ? "Weekly is the gold standard — every valuation, variance and order suggestion is only as fresh as the last count. A key-items count takes minutes."
+              : "The first approved count starts every number in Pantry — valuation, variance, the order sheet. Count the key items first; it takes minutes."}
+          />
+          <Link href="/count" className="inline-flex items-center rounded-lg bg-ai text-bg font-semibold px-4 py-2.5 text-sm hover:opacity-90">
+            Start a count
+          </Link>
+        </Card>
+      ) : null}
+
       {/* ── Food cost, window to window ── the weekly-P&L habit at
           Pantry's scale: one bar per counted window. The trend lives
           here on Today; the full hunting list lives on Recipes. */}
-      {trend && trend.filter((point) => point.cogsPct != null).length >= 2 ? (
+      {trend && trend.points.filter((point) => point.cogsPct != null).length >= 2 ? (
         <Card className="p-5">
           <SectionHeading
             title="Food cost, window to window"
-            note="Each bar is one counted window: opening valuation + deliveries − closing valuation, as a % of that window's net sales. Count weekly and this becomes your weekly food cost."
+            note={`Each bar is one counted window: opening valuation + deliveries − closing valuation, as a % of that window's net sales.${trend.targetPct != null ? ` The line is your ${percent(trend.targetPct, 0)} target.` : " Set a target under Settings and it draws on this chart."}`}
             action={<Link href="/recipes" className="text-sm text-ai hover:underline shrink-0">Full report →</Link>}
           />
           <Columns
             height={120}
             valueLabel="Food cost"
             showValues
-            points={trend
+            target={trend.targetPct != null ? { value: trend.targetPct, label: `target ${percent(trend.targetPct, 0)}` } : undefined}
+            points={trend.points
               .filter((point) => point.cogsPct != null)
               .map((point) => ({
                 key: point.key,
@@ -172,7 +193,7 @@ export default function TodayPage() {
               }))}
             format={(value) => percent(value)}
           />
-          {trend.some((point) => point.cogsPct == null) ? (
+          {trend.points.some((point) => point.cogsPct == null) ? (
             <p className="mt-2 text-xs text-ink-400">Windows with no recorded sales are left out — a 0% food cost would be a lie.</p>
           ) : null}
         </Card>

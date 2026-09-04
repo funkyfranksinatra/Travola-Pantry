@@ -36,6 +36,8 @@ type VarianceData = {
     openingValueCents: number; closingValueCents: number; varianceValueCents: number;
     actualUsageValueCents: number; wasteValueCents: number; salesCents: number; cogsPct: number | null;
   };
+  unmapped?: { salesCents: number; checkSalesCents: number; pct: number | null };
+  targetPct?: number | null;
   rows?: VarianceRow[];
 };
 type Drill = {
@@ -197,6 +199,13 @@ export default function RecipesPage() {
             hint={totals.salesCents > 0
               ? `Against ${money(totals.salesCents)} net sales in the window.`
               : "No sales recorded inside this window yet — close out services or connect the POS."}
+            footnote={
+              variance.targetPct != null && totals.cogsPct != null
+                ? `Target ${percent(variance.targetPct, 0)} — ${Math.abs(totals.cogsPct - variance.targetPct) < 0.05
+                    ? "on it."
+                    : `${Math.abs(totals.cogsPct - variance.targetPct).toFixed(1)} pts ${totals.cogsPct > variance.targetPct ? "over" : "under"}.`}`
+                : undefined
+            }
           />
           <StatTile
             label="Explained by waste"
@@ -243,6 +252,13 @@ export default function RecipesPage() {
             </p>
             {variance.salesNote ? (
               <p className="mb-3 rounded-lg bg-panel-up/50 border border-border px-3.5 py-2.5 text-sm text-ink-200">{variance.salesNote}</p>
+            ) : null}
+            {variance.unmapped?.pct != null && variance.unmapped.pct >= 1 ? (
+              <p className="mb-3 rounded-lg bg-state-diningBg/40 border border-state-dining/30 px-3.5 py-2.5 text-sm text-ink-200">
+                {percent(variance.unmapped.pct, 0)} of this window's POS sales ({money(variance.unmapped.salesCents)}) rang through dishes
+                with no recipe — their ingredients left the shelves invisibly, so theoretical usage and the variances below are
+                understated by about that share. Adding those recipes above is the quickest way to sharpen this report.
+              </p>
             ) : null}
             <div className="overflow-x-auto">
               <table className="data-table w-full">

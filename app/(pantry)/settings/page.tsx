@@ -18,6 +18,36 @@ export default function SettingsPage() {
   const [capsError, setCapsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // ── Food-cost target ──
+  const [target, setTarget] = useState("");
+  const [targetSaved, setTargetSaved] = useState<number | null>(null);
+  const [targetError, setTargetError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/pantry-settings")
+      .then((response) => response.json())
+      .then((body) => {
+        if (body.foodCostTargetPct != null) { setTargetSaved(body.foodCostTargetPct); setTarget(String(body.foodCostTargetPct)); }
+      })
+      .catch(() => setTargetError("Could not load the target."));
+  }, []);
+
+  async function saveTarget() {
+    const raw = target.trim();
+    const value = raw === "" ? null : Number(raw);
+    if (value === targetSaved || (raw === "" && targetSaved == null)) return;
+    setTargetError(null);
+    try {
+      const response = await fetch("/api/pantry-settings", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "set", foodCostTargetPct: raw === "" ? null : value }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error);
+      setTargetSaved(body.foodCostTargetPct);
+    } catch (err) { setTargetError((err as Error).message || "Could not save."); }
+  }
+
   // ── Weekly report subscription ──
   const [subEmail, setSubEmail] = useState("");
   const [subEnabled, setSubEnabled] = useState(true);
@@ -144,6 +174,23 @@ export default function SettingsPage() {
           ))}
         </div>
         <p className="mt-3 text-xs text-ink-400 leading-relaxed">Saves as you leave each field. Items pick their category in the room editor on the Inventory tab.</p>
+      </Card>
+
+      <Card className="p-5">
+        <SectionHeading title="Food-cost target"
+          note="The food-cost % this restaurant manages to. One number, ten seconds to set — and the trend chart, the variance report and the Monday email all gain a verdict: not just 33.1%, but 33.1% against your 30." />
+        {targetError ? <p className="mb-3 text-sm text-state-seated">{targetError}</p> : null}
+        <label className="flex items-center gap-2 max-w-[200px]">
+          <input
+            className="w-24 rounded-lg bg-panel border border-border px-3 py-2 text-right text-sm text-ink-50 tabular-nums placeholder:text-ink-400/60 focus:border-ai outline-none"
+            inputMode="decimal" placeholder="30"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            onBlur={saveTarget}
+          />
+          <span className="text-sm text-ink-400">% of net sales</span>
+        </label>
+        <p className="mt-2 text-xs text-ink-400">Saves when you leave the field. Blank removes the target. Most full-service restaurants aim for 25–35%.</p>
       </Card>
 
       <Card className="p-5">

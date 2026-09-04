@@ -25,6 +25,8 @@ export function renderDigest(input: {
   restaurantName: string;
   appUrl: string;
   report: VarianceReport;
+  /// Injectable clock so the cadence nudge is testable. Defaults to now.
+  now?: Date;
 }): { subject: string; html: string } | null {
   const { report } = input;
   // Nothing to say beats saying nothing at length. A restaurant with no
@@ -32,11 +34,22 @@ export function renderDigest(input: {
   if (!report.ready) return null;
 
   const { totals } = report;
+  const now = input.now ?? new Date();
   const name = esc(input.restaurantName);
   const pct = totals.cogsPct != null ? `${totals.cogsPct.toFixed(1)}%` : null;
+  // The target turns the number into a verdict, subject line included —
+  // "34.8%, target 30" gets opened; "34.8%" gets filed.
+  const versusTarget =
+    report.targetPct != null && totals.cogsPct != null
+      ? totals.cogsPct - report.targetPct
+      : null;
   const subject = pct
-    ? `${input.restaurantName} — food cost ${pct} this window`
+    ? `${input.restaurantName} — food cost ${pct}${report.targetPct != null ? ` (target ${report.targetPct.toFixed(0)}%)` : ""} this window`
     : `${input.restaurantName} — inventory window closed at ${usd(totals.actualUsageValueCents)} used`;
+
+  // Count cadence: the whole system leans on regular counts, so a stale
+  // closing count is the digest's business.
+  const daysSinceCount = Math.floor((now.getTime() - new Date(report.window.to).getTime()) / 86_400_000);
 
   const top = report.rows
     .filter((row) => row.varianceValueCents != null && row.varianceValueCents !== 0)
@@ -54,10 +67,11 @@ export function renderDigest(input: {
         </tr>`).join("")
     : `<tr><td colspan="3" ${cell}>No unexplained variances this window — a clean week.</td></tr>`;
 
-  const stat = (label: string, value: string) => `
+  const stat = (label: string, value: string, sub?: string) => `
     <td style="padding:14px 16px;background:#f5f5f7;border-radius:10px;vertical-align:top">
       <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#6e6e73">${label}</div>
       <div style="font-size:22px;font-weight:650;color:#1d1d1f;margin-top:4px">${value}</div>
+      ${sub ? `<div style="font-size:11px;color:#6e6e73;margin-top:3px">${sub}</div>` : ""}
     </td>`;
 
   const html = `<!doctype html>
@@ -73,7 +87,13 @@ export function renderDigest(input: {
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
           ${stat("Food cost", usd(totals.actualUsageValueCents))}
           <td style="width:10px"></td>
-          ${stat("% of sales", pct ?? "—")}
+          ${stat(
+            "% of sales",
+            pct ?? "—",
+            versusTarget != null && report.targetPct != null
+              ? `target ${report.targetPct.toFixed(0)}% · ${Math.abs(versusTarget) < 0.05 ? "on it" : `${Math.abs(versusTarget).toFixed(1)} pts ${versusTarget > 0 ? "over" : "under"}`}`
+              : undefined,
+          )}
           <td style="width:10px"></td>
           ${stat("Unexplained (net)", usd(totals.varianceValueCents))}
         </tr></table>
@@ -89,7 +109,9 @@ export function renderDigest(input: {
           ${rowsHtml}
         </table>
         ${totals.wasteValueCents > 0 ? `<div style="font-size:12px;color:#6e6e73;margin-top:10px">${usd(totals.wasteValueCents)} of this week's usage is logged waste — explained, not missing.</div>` : ""}
+        ${report.unmapped.pct != null && report.unmapped.pct >= 5 ? `<div style="font-size:12px;color:#b45309;margin-top:10px">${report.unmapped.pct.toFixed(0)}% of the window's POS sales (${usd(report.unmapped.salesCents)}) rang through dishes with no recipe — theoretical usage, and the variances above, are understated by about that share. Adding those recipes is the quickest way to make this report sharper.</div>` : ""}
         ${!report.hasSalesData ? `<div style="font-size:12px;color:#6e6e73;margin-top:10px">No item-level sales reached this window, so theoretical usage is unknown — the variances above are actual-usage signals only.</div>` : ""}
+        ${daysSinceCount >= 7 ? `<div style="font-size:12px;color:#b45309;margin-top:10px">The closing count is ${daysSinceCount} days old. Weekly counting is what keeps every number here trustworthy — an approved count today starts the next window.</div>` : ""}
       </td></tr>
       <tr><td style="padding-top:24px">
         <a href="${esc(input.appUrl)}/recipes" style="display:inline-block;background:#4f46e5;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;padding:10px 18px;border-radius:8px">Open the full report</a>
