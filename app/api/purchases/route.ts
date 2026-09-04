@@ -14,12 +14,20 @@ import { threeWayMatch } from "@/lib/inventory";
 
 export const dynamic = "force-dynamic";
 
-async function presentPurchase(purchaseId: string) {
+/** The restaurant's per-category caps, as a category → % map. Absent
+ *  categories fall back to the 2% default inside threeWayMatch. */
+async function capMap(restaurantId: string) {
+  const caps = await prisma.inventoryCategoryCap.findMany({ where: { restaurantId } });
+  return new Map(caps.map((cap) => [cap.category, Number(cap.capPct)]));
+}
+
+async function presentPurchase(purchaseId: string, restaurantId: string) {
   const purchase = await prisma.purchase.findUnique({
     where: { id: purchaseId },
-    include: { lines: { include: { item: { select: { name: true, purchaseUnit: true, lastCostCents: true } } } } },
+    include: { lines: { include: { item: { select: { name: true, purchaseUnit: true, lastCostCents: true, category: true, contractPriceCents: true } } } } },
   });
   if (!purchase) return null;
+  const caps = await capMap(restaurantId);
   const match = threeWayMatch({
     invoiceTotalCents: purchase.invoiceTotalCents,
     lines: purchase.lines.map((line) => ({
@@ -28,6 +36,8 @@ async function presentPurchase(purchaseId: string) {
       qtyReceived: line.qtyReceived == null ? null : Number(line.qtyReceived),
       unitCostCents: line.unitCostCents,
       previousCostCents: line.item.lastCostCents,
+      capPct: caps.get(line.item.category) ?? null,
+      contractPriceCents: line.item.contractPriceCents,
     })),
   });
   return {
@@ -54,7 +64,7 @@ export async function GET(request: Request) {
     if (id) {
       const one = await prisma.purchase.findFirst({ where: { id, restaurantId }, select: { id: true } });
       if (!one) return NextResponse.json({ error: "Not found." }, { status: 404 });
-      return Response.json({ purchase: await presentPurchase(id) });
+      return Response.json({ purchase: await presentPurchase(id, restaurantId) });
     }
     const purchases = await prisma.purchase.findMany({
       where: { restaurantId },
@@ -114,6 +124,7 @@ export async function POST(request: Request) {
     if (purchase.status === "reconciled") return NextResponse.json({ error: "Already reconciled." }, { status: 409 });
 
     const received = Array.isArray(body.lines) ? (body.lines as Array<Record<string, unknown>>) : [];
+    const caps = await capMap(restaurantId);
     const priceChanges: string[] = [];
     for (const line of purchase.lines) {
       const update = received.find((r) => String(r.lineId) === line.id);
@@ -129,7 +140,13 @@ export async function POST(request: Request) {
         await prisma.inventoryItem.update({ where: { id: line.itemId }, data: { lastCostCents: cost } });
         if (wasCents > 0) {
           const pct = ((cost - wasCents) / wasCents) * 100;
-          if (Math.abs(pct) >= 2) priceChanges.push(`${line.item.name} ${pct > 0 ? "up" : "down"} ${Math.abs(pct).toFixed(0)}%`);
+          // The note honours the item category's cap: a produce swing a
+          // manager said is normal stays quiet; anything past the cap —
+          // or past 2% where no cap is set — is named out loud.
+          const cap = caps.get(line.item.category) ?? 2;
+          if (Math.abs(pct) >= cap) {
+            priceChanges.push(`${line.item.name} ${pct > 0 ? "up" : "down"} ${Math.abs(pct).toFixed(0)}%${caps.has(line.item.category) ? ` (cap ${cap}%)` : ""}`);
+          }
         }
       }
     }
@@ -152,14 +169,14 @@ export async function POST(request: Request) {
       summary: `Received ${purchase.vendorName} delivery${priceChanges.length ? ` — ${priceChanges.join(", ")}` : ""}`,
       req: request,
     });
-    return NextResponse.json({ ok: true, priceChanges, purchase: await presentPurchase(purchase.id) });
+    return NextResponse.json({ ok: true, priceChanges, purchase: await presentPurchase(purchase.id, restaurantId) });
   }
 
   if (action === "reconcile") {
     const purchase = await prisma.purchase.findFirst({ where: { id: String(body.id), restaurantId } });
     if (!purchase) return NextResponse.json({ error: "Not found." }, { status: 404 });
     if (purchase.status !== "received") return NextResponse.json({ error: "Receive the delivery first." }, { status: 409 });
-    const presented = await presentPurchase(purchase.id);
+    const presented = await presentPurchase(purchase.id, restaurantId);
     // Reconciliation is blocked while the match has problems, unless the
     // caller explicitly says they have looked. Averaging away a $300
     // invoice mismatch is how AP automation gets a bad name.

@@ -112,6 +112,7 @@ model Restaurant {
   recipes          Recipe[]
   purchases        Purchase[]
   wasteEvents      WasteEvent[]
+  categoryCaps     InventoryCategoryCap[]
 }
 
 // ─── CRM ─────────────────────────────────────────────────────────────
@@ -1158,6 +1159,20 @@ model InventoryItem {
   /// The ~20% of items that are ~80% of cost; counted weekly.
   isKeyItem Boolean  @default(false)
 
+  /// Accounting grouping — meat, produce, dairy… — the axis price caps
+  /// and the cost breakout aggregate on. A fixed list in the app, not
+  /// free text: a typo'd category silently falls outside its cap.
+  category String @default("other")
+
+  /// Default vendor for suggested orders. The order sheet groups by
+  /// this, so one "what do we need" pass becomes one PO per vendor.
+  preferredVendor String @default("")
+
+  /// Contracted cents per PURCHASE unit, when a contract exists.
+  /// Receiving above it is a contract violation — surfaced at the
+  /// three-way match, never averaged away.
+  contractPriceCents Int?
+
   /// Walk order WITHIN the room — shelf-to-sheet.
   sortOrder Int     @default(0)
   active    Boolean @default(true)
@@ -1337,4 +1352,24 @@ model WasteEvent {
   occurredAt DateTime @default(now())
 
   @@index([restaurantId, occurredAt])
+}
+
+/// The allowed price move per item CATEGORY, in percent, both
+/// directions. Beef up 20% may be the market; beef up 20,000% is a
+/// wrong unit of measure typed on an invoice. The cap separates
+/// "worth a look" from noise — and it is per category because produce
+/// swings weekly while dry goods should not. No row = the default 2%.
+model InventoryCategoryCap {
+  id           String     @id @default(cuid())
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  category String
+  /// Allowed ± percent move on a received price before it is flagged.
+  capPct   Decimal @default(10) @db.Decimal(6, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([restaurantId, category])
 }

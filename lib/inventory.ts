@@ -26,6 +26,32 @@ export const ROOM_KIND_LABELS: Record<RoomKind, string> = {
 export const ITEM_KINDS = ["food", "beverage", "nonfood"] as const;
 export const WASTE_REASONS = ["spoilage", "prep_error", "breakage", "comp", "staff_meal", "other"] as const;
 
+// Accounting categories — the axis the price caps and the cost breakout
+// aggregate on. A fixed list rather than free text, because a typo'd
+// category would silently fall outside its cap and never be flagged.
+export const ITEM_CATEGORIES = [
+  "meat", "seafood", "produce", "dairy", "bakery",
+  "dry", "beverage", "alcohol", "nonfood", "other",
+] as const;
+export type ItemCategory = (typeof ITEM_CATEGORIES)[number];
+
+export const ITEM_CATEGORY_LABELS: Record<ItemCategory, string> = {
+  meat: "Meat",
+  seafood: "Seafood",
+  produce: "Produce",
+  dairy: "Dairy",
+  bakery: "Bakery",
+  dry: "Dry goods",
+  beverage: "Beverage (non-alc)",
+  alcohol: "Alcohol",
+  nonfood: "Non-food",
+  other: "Other",
+};
+
+/** The price-move threshold when no per-category cap is set. A cent of
+ *  drift is rounding; 2% is a price change worth a look. */
+export const DEFAULT_PRICE_CAP_PCT = 2;
+
 export type UnitSpec = {
   countPerPurchase: number; // count units in one purchase unit
   usagePerCount: number;    // usage units in one count unit
@@ -227,7 +253,8 @@ export function plateMarginPct(priceCents: number, costCents: number): number | 
 export type MatchProblem =
   | { kind: "short"; itemName: string; ordered: number; received: number }
   | { kind: "over"; itemName: string; ordered: number; received: number }
-  | { kind: "price_changed"; itemName: string; wasCents: number; nowCents: number; pct: number }
+  | { kind: "price_changed"; itemName: string; wasCents: number; nowCents: number; pct: number; capPct: number }
+  | { kind: "contract_violation"; itemName: string; contractCents: number; paidCents: number }
   | { kind: "invoice_mismatch"; invoiceCents: number; receivedCents: number };
 
 export function threeWayMatch(purchase: {
@@ -238,6 +265,12 @@ export function threeWayMatch(purchase: {
     qtyReceived: number | null;
     unitCostCents: number;
     previousCostCents: number;
+    /// Allowed ± % price move for this item's CATEGORY. Beef up 20% may
+    /// be the market; up 20,000% is a wrong unit of measure typed on the
+    /// invoice — the cap catches both kinds of surprise. Absent = 2%.
+    capPct?: number | null;
+    /// Contracted cents per purchase unit, when a contract exists.
+    contractPriceCents?: number | null;
   }>;
 }): { problems: MatchProblem[]; receivedTotalCents: number } {
   const problems: MatchProblem[] = [];
@@ -255,16 +288,31 @@ export function threeWayMatch(purchase: {
     }
     if (line.previousCostCents > 0 && line.unitCostCents !== line.previousCostCents) {
       const pct = ((line.unitCostCents - line.previousCostCents) / line.previousCostCents) * 100;
-      // A cent of drift is rounding; 2% is a price change worth a look.
-      if (Math.abs(pct) >= 2) {
+      // Flag moves outside the category's cap, in either direction. A
+      // drop matters as much as a rise: it is either good news worth
+      // locking in with the vendor, or the same UoM error pointing down.
+      const cap = line.capPct != null && line.capPct > 0 ? line.capPct : DEFAULT_PRICE_CAP_PCT;
+      if (Math.abs(pct) >= cap) {
         problems.push({
           kind: "price_changed",
           itemName: line.itemName,
           wasCents: line.previousCostCents,
           nowCents: line.unitCostCents,
           pct,
+          capPct: cap,
         });
       }
+    }
+    // Contract enforcement is exact: a contracted price is a number the
+    // vendor signed, so a single cent over it is a violation and the
+    // start of a credit-memo conversation, not a rounding note.
+    if (line.contractPriceCents != null && line.contractPriceCents > 0 && line.unitCostCents > line.contractPriceCents) {
+      problems.push({
+        kind: "contract_violation",
+        itemName: line.itemName,
+        contractCents: line.contractPriceCents,
+        paidCents: line.unitCostCents,
+      });
     }
   }
 

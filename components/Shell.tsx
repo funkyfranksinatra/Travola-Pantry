@@ -14,10 +14,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+// Ordered as the work is done: see the shelves, count them, order what
+// is missing, receive the truck, then the analysis tabs.
 const TABS = [
   { href: "/", label: "Today" },
   { href: "/inventory", label: "Inventory" },
   { href: "/count", label: "Count" },
+  { href: "/order", label: "Order" },
   { href: "/purchases", label: "Purchases" },
   { href: "/recipes", label: "Recipes" },
   { href: "/close-out", label: "Close-out" },

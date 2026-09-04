@@ -17,7 +17,8 @@ type Line = { id: string; itemId: string; itemName: string; purchaseUnit: string
 type Problem =
   | { kind: "short"; itemName: string; ordered: number; received: number }
   | { kind: "over"; itemName: string; ordered: number; received: number }
-  | { kind: "price_changed"; itemName: string; wasCents: number; nowCents: number; pct: number }
+  | { kind: "price_changed"; itemName: string; wasCents: number; nowCents: number; pct: number; capPct: number }
+  | { kind: "contract_violation"; itemName: string; contractCents: number; paidCents: number }
   | { kind: "invoice_mismatch"; invoiceCents: number; receivedCents: number };
 type Purchase = {
   id: string; vendorName: string; status: string; orderedAt: string; receivedAt: string | null;
@@ -29,7 +30,8 @@ type PurchaseSummary = { id: string; vendorName: string; status: string; ordered
 const problemText = (p: Problem) =>
   p.kind === "short" ? `${p.itemName}: ordered ${p.ordered}, received ${p.received} — shorted`
   : p.kind === "over" ? `${p.itemName}: ordered ${p.ordered}, received ${p.received} — extra`
-  : p.kind === "price_changed" ? `${p.itemName}: ${money(p.wasCents)} → ${money(p.nowCents)} (${p.pct > 0 ? "up" : "down"} ${Math.abs(p.pct).toFixed(0)}%)`
+  : p.kind === "price_changed" ? `${p.itemName}: ${money(p.wasCents)} → ${money(p.nowCents)} (${p.pct > 0 ? "up" : "down"} ${Math.abs(p.pct).toFixed(0)}% — past the ${p.capPct}% cap for its category)`
+  : p.kind === "contract_violation" ? `${p.itemName}: contracted at ${money(p.contractCents)}, invoiced at ${money(p.paidCents)} — contract violation, worth a credit-memo call`
   : `Invoice says ${money(p.invoiceCents)}; received lines total ${money(p.receivedCents)}`;
 
 export default function PurchasesPage() {
@@ -57,6 +59,14 @@ export default function PurchasesPage() {
     })));
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  // Deep link — ?id= arrives from the variance report's drill-through,
+  // so "that delivery looks wrong" opens the delivery itself.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("id");
+    if (id) openPurchase(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function post(payload: Record<string, unknown>) {
     setBusy(true); setError(null); setNote(null);

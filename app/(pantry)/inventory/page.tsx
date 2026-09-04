@@ -13,7 +13,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button, Card, Chip, Field, PageHeader, SectionHeading, inputClass } from "@/components/ui";
 import { RoomCanvas, toneFor, type Room } from "@/components/RoomCanvas";
-import { ROOM_KINDS, ROOM_KIND_LABELS, ITEM_KINDS, type RoomKind } from "@/lib/inventory";
+import { ROOM_KINDS, ROOM_KIND_LABELS, ITEM_KINDS, ITEM_CATEGORIES, ITEM_CATEGORY_LABELS, type ItemCategory, type RoomKind } from "@/lib/inventory";
 import { money } from "@/lib/format";
 
 type Item = {
@@ -22,11 +22,13 @@ type Item = {
   countPerPurchase: number; usagePerCount: number;
   lastCostCents: number; costPerCountCents: number;
   parLevel: number | null; isKeyItem: boolean; sortOrder: number;
+  category: string; preferredVendor: string; contractPriceCents: number | null;
 };
 
 const EMPTY_ITEM = {
   name: "", kind: "food", purchaseUnit: "case", countUnit: "each", usageUnit: "each",
   countPerPurchase: "1", usagePerCount: "1", lastCost: "", parLevel: "", isKeyItem: false,
+  category: "other", preferredVendor: "", contractPrice: "",
 };
 
 function InventoryInner() {
@@ -45,6 +47,7 @@ function InventoryInner() {
 
   const [form, setForm] = useState({ ...EMPTY_ITEM });
   const [editingItem, setEditingItem] = useState<Item | null>(null);
+  const [mergeInto, setMergeInto] = useState("");
 
   const loadRooms = useCallback(async () => {
     const response = await fetch("/api/rooms");
@@ -92,6 +95,7 @@ function InventoryInner() {
 
   function openItemEditor(item: Item | null) {
     setEditingItem(item);
+    setMergeInto("");
     setForm(item ? {
       name: item.name, kind: item.kind, purchaseUnit: item.purchaseUnit,
       countUnit: item.countUnit, usageUnit: item.usageUnit,
@@ -99,6 +103,8 @@ function InventoryInner() {
       lastCost: item.lastCostCents ? (item.lastCostCents / 100).toFixed(2) : "",
       parLevel: item.parLevel == null ? "" : String(item.parLevel),
       isKeyItem: item.isKeyItem,
+      category: item.category, preferredVendor: item.preferredVendor,
+      contractPrice: item.contractPriceCents == null ? "" : (item.contractPriceCents / 100).toFixed(2),
     } : { ...EMPTY_ITEM });
   }
 
@@ -114,6 +120,9 @@ function InventoryInner() {
       lastCostCents: form.lastCost.trim() === "" ? 0 : Math.round(Number(form.lastCost.replace(/[$,]/g, "")) * 100),
       parLevel: form.parLevel.trim() === "" ? null : Number(form.parLevel),
       isKeyItem: form.isKeyItem,
+      category: form.category,
+      preferredVendor: form.preferredVendor,
+      contractPriceCents: form.contractPrice.trim() === "" ? null : Math.round(Number(form.contractPrice.replace(/[$,]/g, "")) * 100),
     };
     const body = await post("/api/items", payload);
     if (!body) return;
@@ -173,6 +182,8 @@ function InventoryInner() {
                       <span className="block text-[11px] text-ink-400 mt-0.5">
                         counted in {item.countUnit} · {money(Math.round(item.costPerCountCents))}/{item.countUnit}
                         {item.parLevel != null ? ` · par ${item.parLevel}` : ""}
+                        {item.category !== "other" ? ` · ${item.category}` : ""}
+                        {item.preferredVendor ? ` · ${item.preferredVendor}` : ""}
                       </span>
                     </button>
                     <span className="flex items-center gap-1 shrink-0">
@@ -226,6 +237,29 @@ function InventoryInner() {
                   Key item — counted weekly
                 </label>
               </div>
+
+              {/* ── Purchasing ── the fields the order sheet and the
+                  price caps read. Grouped under their own rule so the
+                  form reads as two thoughts: what the item IS, then
+                  how it is BOUGHT. */}
+              <div className="border-t border-border pt-3 mt-1 grid gap-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Category" hint="Price caps and the cost breakout group by this.">
+                    <select className={inputClass} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                      {ITEM_CATEGORIES.map((category) => (
+                        <option key={category} value={category}>{ITEM_CATEGORY_LABELS[category as ItemCategory]}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Preferred vendor" hint="The order sheet groups POs by this.">
+                    <input className={inputClass} value={form.preferredVendor} onChange={(e) => setForm({ ...form, preferredVendor: e.target.value })} placeholder="e.g. Sysco Denver" />
+                  </Field>
+                </div>
+                <Field label="Contract price" hint={`Per ${form.purchaseUnit || "purchase unit"}, if contracted. Receiving above it flags a violation.`}>
+                  <input className={inputClass} inputMode="decimal" placeholder="—" value={form.contractPrice} onChange={(e) => setForm({ ...form, contractPrice: e.target.value })} />
+                </Field>
+              </div>
+
               <div className="flex items-center gap-3 pt-1">
                 <Button type="submit" tone="primary" disabled={busy || !form.name.trim()}>
                   {editingItem ? "Save changes" : "Add to this room"}
@@ -238,6 +272,38 @@ function InventoryInner() {
                 ) : null}
               </div>
             </form>
+
+            {/* ── Merge ── for the day two "Ground beef"s exist and every
+                count splits between them. History moves to the survivor;
+                the duplicate retires. */}
+            {editingItem && items.length > 1 ? (
+              <div className="border-t border-border mt-4 pt-4">
+                <p className="label mb-1.5">Duplicate of another item?</p>
+                <div className="flex gap-2">
+                  <select className={inputClass} value={mergeInto} onChange={(e) => setMergeInto(e.target.value)}>
+                    <option value="">Merge into…</option>
+                    {items.filter((item) => item.id !== editingItem.id).map((item) => (
+                      <option key={item.id} value={item.id}>{item.name}</option>
+                    ))}
+                  </select>
+                  <Button
+                    disabled={busy || !mergeInto}
+                    onClick={async () => {
+                      const target = items.find((item) => item.id === mergeInto);
+                      if (!target) return;
+                      if (!window.confirm(`Merge "${editingItem.name}" into "${target.name}"? Its counts, recipes, orders and waste move over, and "${editingItem.name}" is retired. This cannot be undone.`)) return;
+                      const body = await post("/api/items", { action: "merge", id: editingItem.id, intoId: mergeInto });
+                      if (body && openRoom) { openItemEditor(null); await loadItems(openRoom); await loadRooms(); }
+                    }}
+                  >
+                    Merge
+                  </Button>
+                </div>
+                <p className="mt-1.5 text-xs text-ink-400 leading-relaxed">
+                  All history — counts, recipes, orders, waste — repoints at the item you pick, and this one is retired.
+                </p>
+              </div>
+            ) : null}
           </Card>
         </section>
       </div>

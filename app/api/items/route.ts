@@ -2,7 +2,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { withTenant, requireRestaurant } from "@/lib/tenant";
-import { ITEM_KINDS, costPerCountCents, validateItem } from "@/lib/inventory";
+import { ITEM_KINDS, ITEM_CATEGORIES, costPerCountCents, validateItem } from "@/lib/inventory";
+import { audit } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,7 @@ function present(item: {
   purchaseUnit: string; countUnit: string; usageUnit: string;
   countPerPurchase: unknown; usagePerCount: unknown;
   lastCostCents: number; parLevel: unknown; isKeyItem: boolean; sortOrder: number;
+  category: string; preferredVendor: string; contractPriceCents: number | null;
 }) {
   const spec = {
     countPerPurchase: Number(item.countPerPurchase),
@@ -30,6 +32,8 @@ function present(item: {
     costPerCountCents: Math.round(costPerCountCents(spec) * 100) / 100,
     parLevel: item.parLevel == null ? null : Number(item.parLevel),
     isKeyItem: item.isKeyItem, sortOrder: item.sortOrder,
+    category: item.category, preferredVendor: item.preferredVendor,
+    contractPriceCents: item.contractPriceCents,
   };
 }
 
@@ -66,6 +70,12 @@ export async function POST(request: Request) {
       lastCostCents: Math.round(num(body.lastCostCents, 0)),
       parLevel: body.parLevel == null || body.parLevel === "" ? null : num(body.parLevel, 0),
       isKeyItem: Boolean(body.isKeyItem),
+      category: ITEM_CATEGORIES.includes(body.category as never) ? String(body.category) : "other",
+      preferredVendor: String(body.preferredVendor ?? "").trim().slice(0, 80),
+      contractPriceCents:
+        body.contractPriceCents == null || body.contractPriceCents === ""
+          ? null
+          : Math.max(0, Math.round(num(body.contractPriceCents, 0))) || null,
     };
 
     if (action === "create") {
@@ -88,6 +98,87 @@ export async function POST(request: Request) {
     for (let i = 0; i < ids.length; i += 1) {
       await prisma.inventoryItem.updateMany({ where: { id: ids[i], restaurantId }, data: { sortOrder: i } });
     }
+    return NextResponse.json({ ok: true });
+  }
+
+  // Duplicate consolidation. Two "Ground beef" items split every count,
+  // recipe and delivery between them, and both numbers read as wrong.
+  // The merge repoints history at the survivor and retires the twin —
+  // where both items appear in the SAME count, recipe or order, the
+  // quantities are summed rather than one being dropped.
+  if (action === "merge") {
+    const fromId = String(body.id ?? "");
+    const intoId = String(body.intoId ?? "");
+    if (!fromId || !intoId || fromId === intoId) {
+      return NextResponse.json({ error: "Pick a different item to merge into." }, { status: 400 });
+    }
+    const [from, into] = await Promise.all([
+      prisma.inventoryItem.findFirst({ where: { id: fromId, restaurantId } }),
+      prisma.inventoryItem.findFirst({ where: { id: intoId, restaurantId, active: true } }),
+    ]);
+    if (!from || !into) return NextResponse.json({ error: "Item not found." }, { status: 404 });
+    // Units are the meaning of every historical quantity. "3 cases" of
+    // one item and "3 lb" of another cannot be summed, so a merge across
+    // different units is refused rather than silently corrupting history.
+    if (from.countUnit !== into.countUnit || from.usageUnit !== into.usageUnit || from.purchaseUnit !== into.purchaseUnit) {
+      return NextResponse.json({
+        error: `These items use different units (${from.purchaseUnit}/${from.countUnit}/${from.usageUnit} vs ${into.purchaseUnit}/${into.countUnit}/${into.usageUnit}). Align the units first, then merge.`,
+      }, { status: 409 });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Recipe lines — sum where both items appear in one recipe.
+      const recipeLines = await tx.recipeLine.findMany({ where: { itemId: from.id } });
+      for (const line of recipeLines) {
+        const clash = await tx.recipeLine.findUnique({ where: { recipeId_itemId: { recipeId: line.recipeId, itemId: into.id } } });
+        if (clash) {
+          await tx.recipeLine.update({ where: { id: clash.id }, data: { quantity: Number(clash.quantity) + Number(line.quantity) } });
+          await tx.recipeLine.delete({ where: { id: line.id } });
+        } else {
+          await tx.recipeLine.update({ where: { id: line.id }, data: { itemId: into.id } });
+        }
+      }
+      // Count lines — sum quantity and value where both were counted.
+      const countLines = await tx.inventoryCountLine.findMany({ where: { itemId: from.id } });
+      for (const line of countLines) {
+        const clash = await tx.inventoryCountLine.findUnique({ where: { countId_itemId: { countId: line.countId, itemId: into.id } } });
+        if (clash) {
+          await tx.inventoryCountLine.update({
+            where: { id: clash.id },
+            data: { quantity: Number(clash.quantity) + Number(line.quantity), valueCents: clash.valueCents + line.valueCents },
+          });
+          await tx.inventoryCountLine.delete({ where: { id: line.id } });
+        } else {
+          await tx.inventoryCountLine.update({ where: { id: line.id }, data: { itemId: into.id } });
+        }
+      }
+      // Purchase lines — sum quantities; the survivor's price stands.
+      const purchaseLines = await tx.purchaseLine.findMany({ where: { itemId: from.id } });
+      for (const line of purchaseLines) {
+        const clash = await tx.purchaseLine.findUnique({ where: { purchaseId_itemId: { purchaseId: line.purchaseId, itemId: into.id } } });
+        if (clash) {
+          await tx.purchaseLine.update({
+            where: { id: clash.id },
+            data: {
+              qtyOrdered: Number(clash.qtyOrdered) + Number(line.qtyOrdered),
+              qtyReceived: clash.qtyReceived == null && line.qtyReceived == null
+                ? null
+                : Number(clash.qtyReceived ?? 0) + Number(line.qtyReceived ?? 0),
+            },
+          });
+          await tx.purchaseLine.delete({ where: { id: line.id } });
+        } else {
+          await tx.purchaseLine.update({ where: { id: line.id }, data: { itemId: into.id } });
+        }
+      }
+      await tx.wasteEvent.updateMany({ where: { itemId: from.id }, data: { itemId: into.id } });
+      await tx.inventoryItem.update({ where: { id: from.id }, data: { active: false } });
+    });
+    await audit({
+      restaurantId, action: "item.merged",
+      summary: `Merged "${from.name}" into "${into.name}" — counts, recipes, orders and waste now point at one item`,
+      req: request,
+    });
     return NextResponse.json({ ok: true });
   }
 

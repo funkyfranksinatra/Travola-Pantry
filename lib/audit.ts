@@ -16,7 +16,9 @@ export type AuditAction =
   | "count.rejected"
   | "purchase.received"
   | "purchase.reconciled"
-  | "waste.logged";
+  | "waste.logged"
+  | "item.merged"
+  | "ordering.created";
 
 export async function audit(opts: {
   restaurantId: string;
