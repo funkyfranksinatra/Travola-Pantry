@@ -106,17 +106,19 @@ export function validateItem(input: {
   if (name.length > 80) errors.push({ field: "name", message: "Keep the name under 80 characters." });
 
   for (const [field, label] of [
-    ["countPerPurchase", "Count units per purchase unit"],
-    ["usagePerCount", "Usage units per count unit"],
+    ["countPerPurchase", "the shelf units in one package"],
+    ["usagePerCount", "the recipe units in one shelf unit"],
   ] as const) {
     if (input[field] === undefined) continue;
     const value = Number(input[field]);
     // Zero is the poison value: it silently turns every cost derived
     // from this item into zero, which reads as "free" on a report.
+    // Non-numbers ("80lbs") are rejected by name rather than guessed
+    // at — guessing would bake a wrong unit model into every count.
     if (!Number.isFinite(value) || value <= 0) {
-      errors.push({ field, message: `${label} must be a positive number.` });
+      errors.push({ field, message: `For ${label}, enter just the number, more than zero — the unit names are set separately.` });
     } else if (value > 100000) {
-      errors.push({ field, message: `${label} looks wrong — check the units.` });
+      errors.push({ field, message: `The number for ${label} looks wrong — check it against the packaging.` });
     }
   }
   if (input.lastCostCents !== undefined) {
